@@ -1,0 +1,36 @@
+name: tests
+
+# Public repo CI. Pull requests from forks run with a read-only token and no secrets
+# (GitHub's default for `pull_request`); this workflow needs no secrets at all.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    name: pytest (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      # Keep checked-out line endings exactly as stored (tests check .bat = CRLF, .sh/.command = LF).
+      - name: Disable git autocrlf
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Run tests
+        run: uv run pytest -q

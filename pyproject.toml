@@ -1,0 +1,38 @@
+[project]
+name = "xiaoshen"
+version = "0.1.0"
+description = "教學助理賈維斯：生成式 AI 語音臨床教學助理"
+authors = [{ name = "hsinhsu64" }]
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.162.0",
+    "google-genai>=2.34.0",
+    "httpx>=0.28.1",
+    "opencc>=1.4.2",
+    "openpyxl>=3.1.5",
+    "pymupdf>=2.0",
+    "pypinyin>=0.53",
+    "python-multipart>=0.0.33",
+    "pywin32>=312; sys_platform == 'win32'",
+    "pyobjc-framework-Cocoa>=11; sys_platform == 'darwin'",
+    "qrcode[pil]>=8.2",
+    "sherpa-onnx>=2.0.1",
+    "sounddevice>=0.5.6",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[project.scripts]
+xiaoshen = "xiaoshen.launcher:main"
+
+[build-system]
+requires = ["uv_build>=0.10.12,<0.11.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "python-pptx>=1.0.2",
+]
+
+[tool.pytest.ini_options]
+filterwarnings = ["ignore:Using `httpx` with `starlette.testclient`"]

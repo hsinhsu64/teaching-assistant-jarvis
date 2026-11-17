@@ -1,0 +1,11 @@
+# 本機檔案，不進 git（不要 commit 設定、金鑰、記錄或安裝時下載的工具）
+config.toml
+config.toml.tmp
+.venv/
+__pycache__/
+.pytest_cache/
+/tools/
+*.log
+.install-staging/
+.program.sha256
+診斷包-*.zip

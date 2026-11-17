@@ -1,0 +1,43 @@
+:root {
+  --ink: #1c2733;
+  --muted: #5b6b7c;
+  --paper: #ffffff;
+  --bg: #f4f6f9;
+  --navy: #102033;
+  --navy-2: #1b3350;
+  --navy-ink: #e8f1ff;
+  --accent: #3d8bfd;
+  --ok: #2fa36b;
+  --warn: #e0a100;
+  --fail: #d64545;
+  --correct: #36c486;
+  font-family: "Microsoft JhengHei", "Noto Sans TC", system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+
+button {
+  font: inherit;
+  cursor: pointer;
+  border: 0;
+  border-radius: 8px;
+  padding: 10px 16px;
+  background: var(--accent);
+  color: #fff;
+}
+button:disabled { background: #b8c2cc; cursor: default; }
+button.secondary { background: #e3e8ee; color: var(--ink); }
+
+/* ---- 抽屜（投影與主持人畫面共用的題目卡片樣式） ---- */
+.q-stem { font-weight: 700; margin-bottom: 0.6em; line-height: 1.35; }
+.opt-row { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; align-items: center; margin: 6px 0; }
+.opt-label { line-height: 1.3; }
+.opt-label.is-correct { color: var(--correct); font-weight: 700; }
+.opt-label.is-correct::after { content: " ✓"; }
+.opt-count { font-variant-numeric: tabular-nums; min-width: 2ch; text-align: right; }
+.bar { grid-column: 1 / -1; height: 8px; background: rgba(255, 255, 255, 0.12); border-radius: 4px; overflow: hidden; }
+.bar > span { display: block; height: 100%; background: var(--accent); }
+.bar > span.is-correct { background: var(--correct); }
+.explain { margin-top: 0.6em; font-size: 0.9em; opacity: 0.9; line-height: 1.4; }
+.source { margin-top: 0.3em; font-size: 0.8em; opacity: 0.7; }

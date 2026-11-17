@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>作答</title>
+  <link rel="stylesheet" href="/static/common.css">
+  <style>
+    body { background: var(--bg); color: var(--ink); font-size: 17px; padding: 16px; max-width: 560px; margin: 0 auto; }
+    .meta { font-size: 13px; color: var(--muted); margin-bottom: 6px; display: flex; justify-content: space-between; }
+    .stem { font-weight: 700; font-size: 18px; line-height: 1.4; margin: 6px 0 12px; overflow-wrap: anywhere; }
+    .opt { display: block; width: 100%; text-align: left; margin: 8px 0; padding: 12px 14px; border-radius: 10px;
+           border: 1.5px solid #c9d3df; background: #fff; color: var(--ink); line-height: 1.35; overflow-wrap: anywhere; }
+    .opt.sel { border-color: #1d4e89; background: #e3ecfb; font-weight: 600; }
+    .opt.right { border-color: var(--ok); background: #e3f6ec; }
+    .opt.wrong { border-color: var(--fail); background: #fbe7e7; }
+    .nav { display: flex; gap: 8px; margin-top: 14px; }
+    .nav button { flex: 1; }
+    .full { width: 100%; margin-top: 14px; padding: 13px; }
+    .note { text-align: center; color: var(--muted); margin-top: 40px; }
+    .msg { margin-top: 10px; font-size: 14px; color: var(--muted); min-height: 1.2em; }
+    .msg.err { color: var(--fail); }
+    .result { border-top: 1px solid #dde3ea; padding-top: 12px; margin-top: 12px; }
+    .explain { font-size: 15px; line-height: 1.45; color: #34495e; margin-top: 6px; }
+    .dots { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+    .dot { width: 30px; height: 30px; border-radius: 50%; border: 1.5px solid #c9d3df; background: #fff; color: var(--ink);
+           padding: 0; font-size: 13px; }
+    .dot.done { background: #e3ecfb; border-color: #1d4e89; }
+    .dot.cur { outline: 2px solid var(--accent); }
+    /* §6.3a 打字發問與投影控制 */
+    details.panel { border: 1px solid #dde3ea; border-radius: 10px; padding: 8px 12px; margin: 0 0 12px; background: #fff; }
+    details.panel summary { font-weight: 600; cursor: pointer; padding: 4px 0; }
+    #askText, #teacherText { width: 100%; min-height: 4.5em; font: inherit; padding: 8px; border-radius: 8px; border: 1px solid #c9d3df;
+               box-sizing: border-box; margin-top: 8px; }
+    .routes { display: flex; gap: 16px; margin-top: 8px; font-size: 15px; }
+    .ctl-row { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
+    .ctl-row button { flex: 1; }
+    .ctl-row input { width: 4.5em; font: inherit; padding: 8px; }
+    .deck-btn { display: block; width: 100%; text-align: left; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <details id="teacherBox" class="panel" open><summary>🙋 詢問老師（只有老師看得到）</summary>
+    <textarea id="teacherText" maxlength="300" placeholder="輸入想問老師的問題（請勿輸入病人姓名、病歷號等識別資訊）"></textarea>
+    <button id="teacherSend" class="full">送給老師</button>
+    <div id="teacherMsg" class="msg"></div>
+  </details>
+  <details id="askBox" class="panel" style="display:none"><summary>🔎 搜尋網路（結果顯示在投影幕上）</summary>
+    <textarea id="askText" maxlength="300" placeholder="輸入要查的問題（請勿輸入病人姓名、病歷號等識別資訊）"></textarea>
+    <button id="askSend" class="full">送出搜尋</button>
+    <div id="askMsg" class="msg"></div>
+  </details>
+  <details id="ctlBox" class="panel"><summary>🖥️ 投影控制（翻頁／播放）</summary>
+    <div id="ctl"></div>
+    <div id="ctlMsg" class="msg"></div>
+  </details>
+  <div id="app"><p class="note">載入中…</p></div>
+  <script src="/static/phone.js"></script>
+</body>
+</html>

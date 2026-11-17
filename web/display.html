@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <title data-suffix="投影">投影</title>
+  <link rel="stylesheet" href="/static/common.css">
+  <style>
+    html, body { height: 100%; background: #000; overflow: hidden; }
+    #stage { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
+    #slide { max-width: 100%; max-height: 100%; object-fit: contain; }
+    #empty { color: #9aa7b4; font-size: 2vw; }
+    #light {
+      position: fixed; top: 1.2vh; right: 1vw; z-index: 3;
+      padding: 0.3em 0.9em; border-radius: 999px; font-size: 1.1vw;
+      background: rgba(16, 32, 51, 0.85); color: #7ff; transition: opacity .3s;
+    }
+    #light.offline { color: #ffb4b4; }
+    #light.quiz { color: #ffe08a; }
+    #light.voice { color: #9fe8b0; }
+    #phi {
+      position: fixed; left: 1vw; bottom: 1.5vh; z-index: 3; padding: 0.3em 0.9em; border-radius: 999px;
+      background: rgba(60, 45, 0, 0.9); color: #ffe08a; font-size: 1.1vw;
+    }
+    #vconfirm {
+      position: fixed; top: 2.5vh; left: 50%; transform: translateX(-50%); z-index: 4; max-width: 80vw;
+      padding: 0.8em 1.4em; border-radius: 0.6em; border: 0.15vw solid #ffe08a;
+      background: rgba(6, 18, 31, 0.94); color: #fff; font-size: 2vw; line-height: 1.4; text-align: center;
+    }
+    #vconfirm .q { color: #ffe08a; font-weight: 700; }
+    #vconfirm .how { display: block; font-size: 1.2vw; color: #9fb3c8; margin-top: 0.3em; }
+    #drawer {
+      position: fixed; top: 0; right: 0; bottom: 0; width: 40vw; z-index: 2;
+      background: var(--navy); color: var(--navy-ink);
+      box-shadow: -1vw 0 2vw rgba(0, 0, 0, .45);
+      padding: 6vh 1.6vw 2vh; overflow: hidden;
+      transform: translateX(105%); transition: transform .35s ease;
+      font-size: 1.35vw; display: flex; flex-direction: column; gap: 1.2vh;
+    }
+    #drawer.open { transform: none; }
+    .card { background: var(--navy-2); border-radius: 10px; padding: 1.4vh 1vw; }
+    .head { display: flex; justify-content: space-between; font-size: 0.85em; opacity: .85; }
+    .qr-row { display: flex; gap: 1vw; align-items: center; }
+    .qr-row img { width: 9vw; height: 9vw; background: #fff; border-radius: 6px; padding: 4px; }
+    .tunnel-down { color: #ffb4b4; }
+    .exam-list { overflow: auto; display: flex; flex-direction: column; gap: 1vh; }
+    .rate { float: right; font-variant-numeric: tabular-nums; }
+    .ask-q { font-size: 0.9em; opacity: .8; }
+    .ans-summary { font-weight: 700; font-size: 1.1em; line-height: 1.35; }
+    .ans-list { overflow: auto; display: flex; flex-direction: column; gap: 1vh; }
+    .ans-card { line-height: 1.4; }
+    .ans-quote { margin-top: 0.4em; font-size: 0.75em; opacity: .75; font-style: italic; }
+    .ans-error { color: #ffe08a; }
+    .ans-derived { border-left: 0.35vw solid #ffb070; }
+    .ans-table { overflow-x: auto; }
+    .ans-table table { border-collapse: collapse; width: 100%; font-size: 0.72em; }
+    .ans-table th, .ans-table td { border: 1px solid rgba(255,255,255,.25); padding: 0.4vh 0.4vw; text-align: left; vertical-align: top; }
+    .ans-table th { background: rgba(255,255,255,.08); }
+    .ans-fig { margin: 0; }
+    .ans-fig img { display: block; max-width: 100%; max-height: 26vh; margin: 0 auto; background: #fff; border-radius: 4px; cursor: zoom-in; }
+    .ans-fig figcaption { font-size: 0.7em; opacity: .8; margin-top: 0.5vh; }
+    /* OE 簡報（§6.2c）：投影幕上可以點的參考文獻框，蓋在投影片上 */
+    #oelinks { position: fixed; inset: 0; z-index: 1; pointer-events: none; }
+    #oelinks .oelink { position: fixed; pointer-events: auto; cursor: pointer; background: transparent;
+      border: 0; border-radius: 4px; padding: 0; }
+    #oelinks .oelink:hover { outline: 2px solid rgba(47, 95, 167, .55); background: rgba(47, 95, 167, .08); }
+    #oelinks .oelink.hit { outline: 3px solid #2f5fa7; background: rgba(47, 95, 167, .18); }
+    #oetoast { position: fixed; left: 50%; bottom: 6vh; transform: translateX(-50%); z-index: 5;
+      background: rgba(11, 26, 42, .92); color: #fff; font-size: 1.4vw; padding: .5em 1.2em; border-radius: 8px; }
+    #figzoom {
+      position: fixed; inset: 0; z-index: 4; background: rgba(0, 0, 0, .88);
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1.5vh; cursor: zoom-out;
+    }
+    #figzoom img { max-width: 94vw; max-height: 84vh; background: #fff; }
+    #figzoom .zoom-cap { color: #e8f1ff; font-size: 1.2vw; max-width: 90vw; text-align: center; }
+    /* ---- 出處原文（§6.2a）---- */
+    #sourceview { position: fixed; inset: 0; z-index: 6; background: #0b1a2a; color: #e8f1ff;
+      display: flex; flex-direction: column; padding: 4vh 5vw; gap: 2vh; overflow: hidden; }
+    #sourceview .sv-head { font-size: 1.1vw; opacity: .8; display: flex; justify-content: space-between; }
+    #sourceview .sv-title { font-size: 2vw; font-weight: 700; line-height: 1.3; }
+    #sourceview .sv-text { font-size: 1.6vw; line-height: 1.7; overflow: auto; flex: 1; white-space: pre-wrap; }
+    #sourceview mark { background: #ffe08a; color: #10202f; padding: 0 .15em; border-radius: 3px; }
+    #sourceview .sv-page { flex: 1; min-height: 0; display: flex; justify-content: center; }
+    #sourceview .sv-page img { max-width: 100%; max-height: 100%; object-fit: contain; background: #fff; }
+    #sourceview .sv-quote { font-size: 1.2vw; opacity: .85; font-style: italic; }
+    #sourceview .sv-note { font-size: 1.6vw; color: #ffe08a; }
+    .card-no { display: inline-block; min-width: 1.6em; margin-right: .4em; padding: 0 .3em; border-radius: 4px;
+      background: rgba(255,255,255,.18); text-align: center; font-weight: 700; }
+    #cardview { position: fixed; inset: 0; z-index: 5; background: #000; display: flex; align-items: center; justify-content: center; cursor: pointer; }
+    #cardview img { max-width: 100vw; max-height: 100vh; }
+    .hide-hint { margin-top: auto; font-size: 0.7em; opacity: .55; text-align: center; }
+    /* ---- 主畫面（§6.0，草圖 mockups/03-jarvis-home.html）---- */
+    #hud { --cyan:#5ee7ff; --cyan2:#1aa6c9; --line:rgba(94,231,255,.35); --ink:#d9f6ff; --dim:#6fa9bd; --warn:#ffcf66;
+      position: fixed; inset: 0; z-index: 1; color: var(--ink); background: #020a12; overflow: hidden; }
+    #hud::before { content:""; position:absolute; inset:0; background:
+        radial-gradient(circle at 50% 48%, rgba(30,140,190,.22), transparent 55%),
+        repeating-linear-gradient(0deg, rgba(94,231,255,.035) 0 1px, transparent 1px 40px),
+        repeating-linear-gradient(90deg, rgba(94,231,255,.035) 0 1px, transparent 1px 40px); }
+    #hud .top { position:absolute; top:0; left:0; right:0; display:flex; justify-content:space-between; padding:1.6vh 2vw;
+      font-size:1.1vw; letter-spacing:.15em; color:var(--dim); }
+    #hud .top b { color:var(--cyan); font-weight:600; }
+    #hud .core { position:absolute; left:50%; top:47%; width:34vh; height:34vh; transform:translate(-50%,-50%); }
+    #hud .ring { position:absolute; inset:0; border-radius:50%; border:2px solid var(--line); }
+    #hud .r1 { border:2px dashed rgba(94,231,255,.5); animation:hudspin 30s linear infinite; }
+    #hud .r2 { inset:9%; border:6px solid transparent; border-top-color:var(--cyan); border-bottom-color:var(--cyan2);
+      animation:hudspin 9s linear infinite reverse; filter:drop-shadow(0 0 8px var(--cyan)); }
+    #hud .r3 { inset:20%; border:1px solid var(--line); }
+    #hud .r4 { inset:28%; border:3px dotted rgba(94,231,255,.7); animation:hudspin 14s linear infinite; }
+    #hud .heart { position:absolute; inset:36%; border-radius:50%;
+      background:radial-gradient(circle, #e9fdff 0%, var(--cyan) 35%, rgba(26,166,201,.15) 70%, transparent 72%);
+      box-shadow:0 0 40px var(--cyan); animation:hudpulse 3s ease-in-out infinite; }
+    #hudBars { position:absolute; inset:-14%; }
+    #hudBars i { position:absolute; left:50%; top:50%; width:.35vh; height:3vh; background:var(--cyan); opacity:.55;
+      transform-origin:50% 0; border-radius:2px; }
+    #hud .state { position:absolute; left:50%; top:calc(47% + 22vh); transform:translateX(-50%); text-align:center; white-space:nowrap; }
+    #hudName { font-size:2.4vw; letter-spacing:.5em; color:var(--cyan); text-shadow:0 0 12px var(--cyan); }
+    #hudSub { font-size:1.1vw; color:var(--dim); margin-top:.6vh; letter-spacing:.2em; }
+    @keyframes hudspin { to { transform:rotate(360deg); } }
+    @keyframes hudpulse { 50% { transform:scale(1.08); opacity:.85; } }
+    #hud .panel { position:absolute; top:9vh; bottom:11vh; background:rgba(10,40,60,.45); border:1px solid var(--line);
+      border-radius:6px; padding:1.6vh 1.2vw; display:flex; flex-direction:column; gap:1vh; }
+    #hud .panel h3 { margin:0; font-size:.95vw; letter-spacing:.3em; color:var(--cyan); font-weight:600; }
+    #hud .panel h3::before { content:"◢ "; }
+    #hud .left { left:2vw; width:26vw; }
+    #hud .right { right:2vw; width:32vw; font-size:1.1vw; }
+    #hudConv, #hudRight { overflow:auto; display:flex; flex-direction:column; gap:1vh; min-height:0; flex:1; }
+    #hud .msg { font-size:1.15vw; line-height:1.5; }
+    #hud .msg .who { font-size:.8vw; color:var(--dim); letter-spacing:.2em; }
+    #hud .msg.me .t { color:#fff; }
+    #hud .msg.xs .t { color:var(--cyan); }
+    #hud .dim { color:var(--dim); }
+    #hud .decks div { font-size:1.15vw; padding:.8vh 0; border-bottom:1px solid rgba(94,231,255,.12); }
+    #hud .decks small { color:var(--dim); margin-left:.6vw; }
+    #hud .card { background:rgba(94,231,255,.06); border-left:3px solid var(--cyan); border-radius:4px; }
+    #hud .card.ans-derived { border-left-color:var(--warn); }
+    #hud .hint { position:absolute; bottom:3vh; left:0; right:0; text-align:center; font-size:1.1vw; color:var(--dim); letter-spacing:.15em; }
+    #hud .hint b { color:var(--cyan); }
+    #hudQr { position:absolute; bottom:2vh; right:2vw; display:flex; gap:.8vw; align-items:center; font-size:.8vw; color:var(--dim); }
+    #hudQr img { width:8vh; height:8vh; background:#fff; border-radius:4px; padding:3px; }
+  </style>
+</head>
+<body>
+  <div id="stage"><img id="slide" alt=""><div id="empty">尚未選擇簡報</div></div>
+  <div id="hud">
+    <div class="top"><div><b class="app-name"></b> &nbsp;TEACHING ASSISTANT &nbsp;·&nbsp; <span id="hudClock"></span></div></div>
+    <section class="panel left"><h3>對話</h3><div id="hudConv"></div></section>
+    <div class="core">
+      <div id="hudBars"></div>
+      <div class="ring r1"></div><div class="ring r2"></div><div class="ring r3"></div><div class="ring r4"></div>
+      <div class="heart"></div>
+    </div>
+    <div class="state"><div id="hudName"></div><div id="hudSub"></div></div>
+    <section class="panel right"><h3 id="hudRightTitle">可以播放的簡報</h3><div id="hudRight"></div></section>
+    <div class="hint" id="hudHint"></div>
+    <div id="hudQr" style="display:none"></div>
+  </div>
+  <div id="light">● 連線中</div>
+  <div id="phi" style="display:none">● 剛剛那句可能含識別資訊</div>
+  <div id="vconfirm" style="display:none">要查的是：<span class="q" id="vconfirmQ"></span>
+    <span class="how">說「對」開始查詢，或直接說出正確的詞</span></div>
+  <div id="oelinks"></div>
+  <div id="oetoast" style="display:none"></div>
+  <div id="figzoom" style="display:none"></div>
+  <div id="cardview" style="display:none"></div>
+  <div id="sourceview" style="display:none"></div>
+  <aside id="drawer"></aside>
+  <script src="/static/quizview.js"></script>
+  <script src="/static/display.js"></script>
+</body>
+</html>

@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title data-suffix="主持人">主持人</title>
+  <link rel="stylesheet" href="/static/common.css">
+  <style>
+    body { background: var(--bg); color: var(--ink); font-size: 15px; }
+    header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: var(--navy); color: var(--navy-ink); }
+    header h1 { font-size: 17px; margin: 0; flex: 1; }
+    #conn { font-size: 13px; }
+    #conn.off { color: #ffb4b4; }
+    main { display: grid; grid-template-columns: minmax(320px, 1fr) minmax(360px, 1.1fr); gap: 14px; padding: 14px 16px; }
+    section { background: var(--paper); border: 1px solid #d6dde6; border-radius: 10px; padding: 12px 14px; }
+    section h2 { font-size: 14px; margin: 0 0 8px; color: var(--muted); font-weight: 600; }
+    #checks { list-style: none; margin: 0; padding: 0; }
+    #checks li { padding: 3px 0; }
+    .lv-ok::before { content: "● "; color: var(--ok); }
+    .lv-warn::before { content: "● "; color: var(--warn); }
+    .lv-fail::before { content: "● "; color: var(--fail); }
+    #warnings { color: #8a5a00; font-size: 13px; margin: 6px 0 0; padding-left: 18px; }
+    #preview { width: 100%; aspect-ratio: 16 / 9; object-fit: contain; background: #222; border-radius: 6px; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+    #pageinfo { font-variant-numeric: tabular-nums; min-width: 6em; text-align: center; }
+    select { font: inherit; padding: 6px; max-width: 100%; }
+    #run .card { border: 1px solid #e1e6ec; border-radius: 8px; padding: 10px; margin-bottom: 8px; }
+    #run .bar { background: #e8edf3; }
+    .muted { color: var(--muted); }
+    .phone { display: flex; gap: 12px; align-items: center; word-break: break-all; font-size: 13px; }
+    .phone img { width: 110px; height: 110px; }
+    .rate { float: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+    textarea { font: inherit; width: 100%; min-height: 4.2em; padding: 8px; border: 1px solid #c9d2dc; border-radius: 8px; resize: vertical; }
+    input[type=number] { font: inherit; width: 4.5em; padding: 6px; }
+    #phi { color: var(--fail); font-size: 13px; margin-top: 4px; }
+    #drop { border: 2px dashed #c9d2dc; border-radius: 8px; padding: 8px; text-align: center; color: var(--muted); font-size: 13px; margin-top: 8px; }
+    #drop.over { border-color: var(--accent); color: var(--accent); }
+    .job { color: var(--accent); font-size: 13px; }
+    .ans-card { border-left: 3px solid var(--accent); padding: 4px 10px; margin: 6px 0; }
+    .ans-quote { font-size: 13px; color: var(--muted); font-style: italic; }
+    .src { font-size: 12px; color: var(--muted); }
+    .err { color: #8a5a00; }
+    .draft { border: 1px solid #e1e6ec; border-radius: 8px; padding: 10px; margin-bottom: 8px; }
+    button.danger { background: var(--fail); color: #fff; }
+    header button.quit { background: transparent; color: var(--navy-ink); border: 1px solid rgba(255,255,255,.5); padding: 4px 12px; }
+    #quitConfirm { display: none; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 16px; background: #fdecec; border-bottom: 1px solid #f0b8b8; color: #7a1f1f; }
+    #quitConfirm.show { display: flex; }
+    #quitConfirm b { flex: 1; min-width: 16em; }
+    #quitDone { display: none; position: fixed; inset: 0; z-index: 50; background: var(--bg); align-items: center; justify-content: center; flex-direction: column; gap: 8px; font-size: 18px; }
+    #quitDone.show { display: flex; }
+    #secSettings label { display: block; margin: 8px 0 2px; font-size: 13px; color: var(--muted); }
+    #secSettings input[type=text] { font: inherit; width: 100%; padding: 6px; border: 1px solid #c9d2dc; border-radius: 6px; }
+    #secSettings .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0 14px; }
+    #settingsMsg { margin-top: 8px; font-size: 13px; }
+    #settingsMsg.err { color: var(--fail); }
+    #hostPhoneQr { display: none; width: 180px; height: 180px; margin-top: 8px; }
+    /* 主持人手機（§6.3b）：直向單欄、翻頁鍵固定在下方；不顯示投影片圖 */
+    body.phone-host { font-size: 16px; padding-bottom: 76px; }
+    body.phone-host .laptop-only, body.phone-host #preview { display: none; }
+    body.phone-host header { flex-wrap: wrap; }
+    body.phone-host main { display: flex; flex-direction: column; gap: 12px; padding: 10px; }
+    body.phone-host main > div { display: contents; }
+    body.phone-host main section { margin-top: 0 !important; min-width: 0; }
+    body.phone-host select { width: 100%; min-width: 0; }
+    body.phone-host .row > label { flex: 1 1 100%; min-width: 0; }
+    body.phone-host #secPhoneUrl { order: 8; }
+    body.phone-host #secChecks { order: 9; }
+    body.phone-host #secSettings { order: 10; }
+    body.phone-host #navBar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 20; margin: 0; padding: 10px;
+      justify-content: space-between; flex-wrap: nowrap; background: var(--paper); border-top: 1px solid #d6dde6; }
+    body.phone-host #navBar button { flex: 1; padding: 14px 8px; }
+  </style>
+</head>
+<body>
+  <header><h1><span class="app-name"></span> · 主持人畫面</h1><span id="conn">連線中…</span><button id="searchToggle" class="quit" title="開放／關閉手機「搜尋網路」（預設關閉）">手機搜尋網路：關</button><button id="phoneToggle" class="quit" title="暫停／恢復手機翻頁、播放、結束簡報">手機投影控制：開</button><button id="quit" class="quit">結束程式</button></header>
+  <div id="quitConfirm" role="alertdialog" aria-labelledby="quitAsk">
+    <b id="quitAsk">確定要結束<span class="app-name"></span>嗎？投影、語音與手機作答都會停止。</b>
+    <button id="quitYes" class="danger">確定結束</button>
+    <button id="quitNo" class="secondary">取消</button>
+    <span id="quitMsg"></span>
+  </div>
+  <div id="quitDone"><b><span class="app-name"></span>已結束</b><span class="muted">投影與主持人視窗會自動關閉；要再用請雙擊桌面的捷徑。</span></div>
+  <main>
+    <div>
+      <section id="secChecks">
+        <h2>開機自我檢查</h2>
+        <ul id="checks"><li class="muted">尚無結果</li></ul>
+        <ul id="warnings"></ul>
+      </section>
+      <section style="margin-top:14px">
+        <h2>簡報</h2>
+        <div id="presentMode" class="src">投影幕：主畫面</div>
+        <div class="row">
+          <button id="presentStop" class="secondary" disabled>回到主畫面</button>
+          <button id="present" style="display:none">播放簡報</button>
+        </div>
+        <div id="deckCands" class="src"></div>
+        <select id="decks"></select>
+        <img id="preview" alt="" style="margin-top:8px">
+        <div class="row" id="navBar">
+          <button id="prev" class="secondary">◀ 上一頁</button>
+          <span id="pageinfo">—</span>
+          <button id="next" class="secondary">下一頁 ▶</button>
+        </div>
+        <div id="ocr" class="src"></div>
+      </section>
+      <section id="secPhoneUrl" style="margin-top:14px">
+        <h2>手機作答網址</h2>
+        <div id="phone" class="phone muted">通道尚未就緒</div>
+      </section>
+      <section class="laptop-only" style="margin-top:14px">
+        <h2>主持人手機（手機掃描後也能當主持人畫面）</h2>
+        <div id="hostPhoneStatus" class="src">尚未連接</div>
+        <div class="row">
+          <button id="hostPhonePair" class="secondary">連接主持人手機</button>
+          <button id="hostPhoneRevoke" class="secondary" style="display:none">解除手機</button>
+        </div>
+        <img id="hostPhoneQr" alt="主持人手機 QR Code">
+        <div id="hostPhoneMsg" class="src"></div>
+      </section>
+    </div>
+    <div>
+      <section>
+        <h2>語音助理</h2>
+        <div class="row" style="margin:0 0 8px">
+          <span id="voiceStatus" class="muted">語音未啟用</span>
+          <span style="flex:1"></span>
+          <button id="voiceWake">叫醒<span class="app-name"></span></button>
+          <button id="voiceStop" class="secondary">停止</button>
+        </div>
+        <div id="voicePhi" class="err" style="display:none">● 剛剛那句可能含識別資訊（未轉送查詢）
+          <button id="voicePhiClear" class="secondary">清除</button></div>
+        <div id="voiceConfirm" style="display:none;margin:6px 0;padding:8px;border:1px solid #e0b000;border-radius:6px">
+          語音要查（<span id="voiceConfirmRoute"></span>）：請確認英文拼字，可直接改字
+          <input id="voiceConfirmText" style="width:100%;margin:4px 0">
+          <button id="voiceConfirmGo">查詢</button>
+          <button id="voiceConfirmCancel" class="secondary">取消</button></div>
+        <div id="voiceRef" class="muted"></div>
+        <div id="voiceCands"></div>
+        <div class="src" style="margin-top:6px">口頭內容未經驗證，以投影字卡為準：</div>
+        <div id="voiceTranscript" class="src" style="max-height:9em;overflow:auto"></div>
+      </section>
+      <section style="margin-top:14px">
+        <h2>問<span class="app-name"></span>（打字內容送出前會先檢查病人識別資訊）</h2>
+        <textarea id="askText" placeholder="輸入去識別化的臨床問題，或出題重點（Ctrl+Enter 送出問題）"></textarea>
+        <div id="phi"></div>
+        <div class="row">
+          <label>來源 <select id="route"></select></label>
+          <button id="ask">問</button>
+          <span style="flex:1"></span>
+          <label>題數 <input id="qn" type="number" min="1" max="20" value="5"></label>
+          <button id="gen" class="secondary">出題</button>
+        </div>
+        <div id="jobs"></div>
+        <div id="drop">把 PDF／pptx 拖到這裡，加入「參考資料」</div>
+      </section>
+      <section style="margin-top:14px">
+        <h2>與會人員提問（手機「詢問老師」，只有你看得到）</h2>
+        <div id="teacherList"><p class="muted">還沒有提問</p></div>
+      </section>
+      <section style="margin-top:14px">
+        <h2>回答</h2>
+        <div class="row" style="margin:0 0 8px">
+          <button id="showAns" class="secondary">投影回答</button>
+          <button id="hideAns">收起回答</button>
+          <button id="makeCard" class="secondary">整理成字卡</button>
+          <button id="hideCard" class="secondary">收回字卡</button>
+          <span id="cardMsg" class="src"></span>
+          <button id="quotes" class="secondary">投影顯示原文</button>
+          <button id="sourceClose" style="display:none">關閉原文</button>
+          <button id="summaryStart" class="secondary" style="display:none">整理重點</button>
+          <button id="summaryCancel" class="secondary" style="display:none">取消整理</button>
+          <span id="sourceMsg" class="src"></span>
+        </div>
+        <div id="answer"><p class="muted">尚未發問</p></div>
+      </section>
+      <section style="margin-top:14px">
+        <h2>題目草稿（只有你看得到；按「發出去」才派給大家）</h2>
+        <div id="draftNotes" class="muted"></div>
+        <div class="row" style="margin:0 0 8px"><button id="publish">發出去</button></div>
+        <div id="drafts"><p class="muted">沒有草稿</p></div>
+      </section>
+      <section style="margin-top:14px">
+        <h2>作答（主持人可見正解，投影幕看不到）</h2>
+        <div class="row" style="margin:0 0 10px">
+          <button id="dispatch">派出本頁題目</button>
+          <button id="reveal">公布答案</button>
+          <button id="collect">收卷</button>
+          <button id="hide" class="secondary">收起抽屜</button>
+        </div>
+        <div id="run"><p class="muted">目前沒有題目</p></div>
+      </section>
+    </div>
+    <section id="secSettings" style="grid-column: 1 / -1">
+      <h2>設定</h2>
+      <div class="grid">
+        <div><label for="setName">名字（1 到 10 字）</label><input id="setName" type="text" maxlength="10" autocomplete="off"></div>
+        <div><label for="setWake">喚醒詞（2 到 4 個中文字；空白＝同名字）</label><input id="setWake" type="text" maxlength="4" autocomplete="off"></div>
+        <div><label for="setSpecialty">科別（例：兒童腎臟科）</label><input id="setSpecialty" type="text" autocomplete="off"></div>
+        <div><label for="setMeeting">會議類型</label><select id="setMeeting"></select>
+          <input id="setMeetingOther" type="text" placeholder="輸入會議名稱" autocomplete="off" style="display:none;margin-top:6px"></div>
+      </div>
+      <div class="row"><button id="settingsSave">儲存</button></div>
+      <div id="settingsMsg" class="src"></div>
+      <div class="row"><button id="diagBtn" class="secondary">產生診斷包</button></div>
+      <div id="diagMsg" class="src">遇到問題時按一下，會在桌面產生一個 zip 檔，請寄給開發者。</div>
+    </section>
+  </main>
+  <script src="/static/quizview.js"></script>
+  <script src="/static/host.js"></script>
+</body>
+</html>

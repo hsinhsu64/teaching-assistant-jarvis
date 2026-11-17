@@ -1,0 +1,60 @@
+# 設定範本。複製成 config.toml（不進 git）後修改。
+# 未列出的欄位使用預設值。
+
+# 名字與喚醒詞
+display_name = "賈維斯"          # 助理的名字（顯示在畫面上、AI 自稱用）
+wake_word = ""                  # 喚醒詞（2～4 個中文字，不可用「下一頁」「上一頁」）；空字串＝和名字相同
+specialty = ""                  # 你的專科，例如 "內科"、"兒科腎臟科"；給 AI 回答與出題當背景
+meeting_type = "病例討論"        # 病例討論／Journal reading／病歷教學／Mortality & Morbidity／VS teaching／其它
+meeting_type_other = ""         # meeting_type 選「其它」時，自訂的名稱
+display_kiosk = true            # 投影視窗用全螢幕（kiosk）模式
+auto_convert_pptx = true        # 放進資料夾的 .pptx 自動轉成可投影的圖片
+
+# 資料根目錄，底下需有：簡報、參考資料、圖庫、題庫、紀錄。
+# 第一次啟動時會跳出視窗選位置並自動寫進 config.toml；要改位置再手動修改。
+# data_root = 'D:\教學助理資料'
+
+# 本機連接埠：控制（投影＋主持人畫面，只限本機）與手機作答（經 cloudflared 對外）
+control_port = 8765
+phone_port = 8766
+
+# 投影機是第幾台螢幕（0 = 主螢幕，1 = 第二台）
+display_monitor = 1
+
+# 瀏覽器（用 Edge／Chrome 的 kiosk 模式開投影視窗）；留空則自動尋找 Edge 再找 Chrome
+# browser = 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
+
+# cloudflared 執行檔；留空則依序找 PATH、安裝腳本放在 tools 裡的那份
+# cloudflared = 'C:\Program Files (x86)\cloudflared\cloudflared.exe'
+
+# 遙控器／鍵盤按鍵（JavaScript KeyboardEvent.key 名稱）
+keys_next = ["PageDown", "ArrowRight", " "]
+keys_prev = ["PageUp", "ArrowLeft"]
+keys_drawer = ["b", "B", "."]   # 收起抽屜
+
+# AI 文字模型（金鑰請設在環境變數 GEMINI_API_KEY，不要寫在這裡）
+model_answer = "gemini-3.1-pro-preview"   # 回答
+model_quiz = "gemini-3.1-pro-preview"     # 出題
+ai_timeout_seconds = 150                  # AI 回答／出題時限（秒）；常逾時就調大
+model_ocr = "gemini-3.5-flash"            # 投影片圖片抄錄
+# 主要模型配額用完（免費方案沒有 Pro 額度）或過載時，依序改用
+model_fallbacks = ["gemini-3.5-flash", "gemini-3.8-flash"]
+# 參考資料一次最多送多少字；超過會請你指定較少的資料，不會偷偷截斷
+max_reference_chars = 400000
+# OpenEvidence 工具位置（預設為 ~/.claude/skills/openevidence/scripts/oe.py）
+# oe_script = 'C:\Users\YourName\.claude\skills\openevidence\scripts\oe.py'
+# openevidence-mcp 資料夾（沒裝 Claude Code 時，本程式用它帶起轉接程式）；預設找 ~/openevidence-mcp 與 ~/.claude/mcp-servers/openevidence-mcp
+# oe_mcp_dir = 'C:\Users\YourName\openevidence-mcp'
+
+# 語音（Phase 3）
+voice_enabled = true
+live_model = "gemini-3.8-live"
+audio_device = ""              # 麥克風名稱的一部分（例如 "USBMIC"）；"" = 系統預設
+speaker_device = ""             # 喇叭名稱的一部分；"" = Windows 預設輸出（例如 "SAMSUNG"）
+voice_idle_seconds = 8          # 叫醒後幾秒內要開始問，否則回待命
+voice_followup_seconds = 6      # 助理答完後幾秒內可以追問
+voice_end_silence_ms = 2000     # 停頓多久（毫秒）才算講完；常被打斷就調大
+voice_max_listen_seconds = 60   # 每次叫醒最多收音（送上雲端）幾秒
+kws_threshold = 0.25            # 喚醒詞門檻：越低越容易叫醒、也越容易誤觸發
+keys_wake = []                  # 遙控器叫醒鍵，例如 ["F5"]
+# kws_model_dir = 'C:\Users\YourName\AppData\Local\xiaoshen\models\sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20'
