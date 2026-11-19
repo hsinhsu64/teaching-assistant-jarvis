@@ -6,6 +6,7 @@ import pymupdf
 import pytest
 
 from xiaoshen.answering import Answer, Card
+from xiaoshen.fulltext import NeedsFallback
 from xiaoshen.pubmed import pmc_fulltext
 from xiaoshen.source_text import SourceUnreadable, pdf_pages
 from xiaoshen.source_view import SourceViewer
@@ -88,8 +89,11 @@ def test_web_pdf_link_returning_html_falls_back_to_abstract(state):
     ref = {"title": "Paper", "doi": "", "pmid": "", "abstract": "ABS", "href": "https://x/y.pdf"}
     _state_with(state, ref, {"kind": "web", "card": 1, "citation": "[1] P", "url": "https://x/y.pdf"})
     v = SourceViewer(state, None, http_get=_no_http, web=FakeWeb())
-    doc = v.read_full(get_bytes=lambda url: (b"<html>login</html>", "text/html"))
-    assert doc.full_text is False and doc.pages == ["ABS"] and "只讀到摘要" in doc.note
+    # 2026-11-18：找不到全文改丟 NeedsFallback，由摘要工作改請 OE 整理，再不行才讀摘要
+    with pytest.raises(NeedsFallback):
+        v.read_full(get_bytes=lambda url: (b"<html>login</html>", "text/html"))
+    doc = v.abstract_doc(ref, "[1] P")
+    assert doc.full_text is False and doc.pages == ["ABS"] and "只讀到摘要" in doc.note and doc.origin == "abstract"
 
 
 def test_read_full_abstract_prefers_pmc(state):
@@ -107,8 +111,10 @@ def test_read_full_abstract_without_pmc_uses_abstract(state):
     ref = {"title": "Paper", "doi": "10.1/x", "pmid": "1", "abstract": "ABS"}
     _state_with(state, ref, {"kind": "abstract", "card": 1, "citation": "[1] P", "text": "ABS"})
     none = json.dumps({"records": [{"pmid": 1, "status": "error"}]})
-    doc = SourceViewer(state, None, http_get=lambda u: none, web=FakeWeb()).read_full(get_bytes=_no_http)
-    assert doc.full_text is False and doc.pages == ["ABS"] and "只讀到摘要" in doc.note
+    v = SourceViewer(state, None, http_get=lambda u: none, web=FakeWeb())
+    with pytest.raises(NeedsFallback) as e:
+        v.read_full(get_bytes=_no_http)
+    assert e.value.ref["title"] == "Paper" and v.current_ref()["title"] == "Paper"
 
 
 def test_web_pmc_url_reads_pmc_fulltext(state):
@@ -136,8 +142,10 @@ def test_no_abstract_and_no_fulltext_is_unreadable(state):
     ref = {"title": "Paper", "doi": "", "pmid": "", "href": "https://x/page"}
     _state_with(state, ref, {"kind": "web", "card": 1, "citation": "[1] P", "url": "https://x/page"})
     v = SourceViewer(state, None, http_get=_no_http, web=FakeWeb())
-    with pytest.raises(SourceUnreadable, match="讀不到這篇的全文或摘要"):
+    with pytest.raises(NeedsFallback):  # 先改請 OE 整理；OE 也不行才讀摘要
         v.read_full(get_bytes=lambda url: (b"<html></html>", "text/html"))
+    with pytest.raises(SourceUnreadable, match="讀不到這篇的全文或摘要"):
+        v.abstract_doc(ref, "[1] P")
 
 
 def test_read_full_without_source_view(state):

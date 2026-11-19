@@ -7,72 +7,150 @@
   <link rel="stylesheet" href="/static/common.css">
   <style>
     body { background: var(--bg); color: var(--ink); font-size: 15px; }
-    header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: var(--navy); color: var(--navy-ink); }
-    header h1 { font-size: 17px; margin: 0; flex: 1; }
+    header { display: flex; align-items: center; gap: 10px; padding: 8px 16px; background: var(--navy); color: var(--navy-ink); }
+    header h1 { font-size: 17px; margin: 0 6px 0 0; white-space: nowrap; }
+    header .spacer { flex: 1; }
     #conn { font-size: 13px; }
     #conn.off { color: #ffb4b4; }
-    main { display: grid; grid-template-columns: minmax(320px, 1fr) minmax(360px, 1.1fr); gap: 14px; padding: 14px 16px; }
+    header button.quit { background: transparent; color: var(--navy-ink); border: 1px solid rgba(255,255,255,.5); padding: 4px 12px; }
+    /* 自我檢查摘要（頂端一行）：點一下展開清單 */
+    #checksToggle { background: rgba(255,255,255,.08); color: var(--navy-ink); border: 1px solid rgba(255,255,255,.25); padding: 4px 12px; font-size: 14px; }
+    #checksToggle::before { content: "● "; }
+    #checksToggle[data-level="ok"]::before { color: #5fd49a; }
+    #checksToggle[data-level="warn"]::before { color: #ffc93d; }
+    #checksToggle[data-level="fail"]::before { color: #ff7b7b; }
+    #checksToggle[data-level="pending"]::before { content: "○ "; color: #b6c4d6; }
+    #checksToggle[data-level="warn"], #checksToggle[data-level="fail"] { border-color: currentColor; }
+    #checksToggle .caret { margin-left: 6px; opacity: .7; }
+    main { display: grid; grid-template-columns: minmax(320px, 1fr) minmax(360px, 1.1fr); gap: 14px; padding: 14px 16px; align-items: start; }
+    main > .col { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+    .span-all { grid-column: 1 / -1; }
     section { background: var(--paper); border: 1px solid #d6dde6; border-radius: 10px; padding: 12px 14px; }
-    section h2 { font-size: 14px; margin: 0 0 8px; color: var(--muted); font-weight: 600; }
+    section h2 { font-size: 15px; margin: 0 0 8px; color: var(--ink); font-weight: 700; }
+    section h2 small, .fold h3 small { font-size: 12px; font-weight: 400; color: var(--muted); margin-left: 6px; }
+    .fold h3 { font-size: 14px; margin: 14px 0 6px; padding-top: 10px; border-top: 1px solid #e6ebf1; color: var(--ink); font-weight: 700; }
+    .fold h3:first-of-type { margin-top: 0; padding-top: 0; border-top: 0; }
+    /* 可收合的卡片（出題與作答、設定與工具）：預設收起，點標題列的箭頭打開 */
+    .fold { background: var(--paper); border: 1px solid #d6dde6; border-radius: 10px; min-width: 0; }
+    .fold > summary { cursor: pointer; padding: 12px 14px; font-weight: 700; list-style-position: inside; }
+    .fold > summary small { font-size: 12px; font-weight: 400; color: var(--muted); margin-left: 6px; }
+    .fold > .fold-body { padding: 0 14px 12px; }
+    .fold-status { font-size: 13px; font-weight: 400; color: var(--muted); margin-left: 8px; }
+    .fold-status.live { color: var(--accent); font-weight: 600; }
+    /* 自我檢查（左欄最上面）：和「設定與工具」一樣用箭頭收合；收起時仍列出黃燈、紅燈、確認中與警告 */
+    #secChecks[data-level="warn"] { border-color: #e7d9a8; }
+    #secChecks[data-level="fail"] { border-color: #f0b8b8; }
+    #checksFold { display: block; width: 100%; text-align: left; background: none; color: var(--ink); padding: 0; border-radius: 0; font-weight: 700; }
+    #checksFold .caret { display: inline-block; width: 1.1em; font-size: 12px; }
+    #checks:not(:empty) { margin-top: 8px; }
     #checks { list-style: none; margin: 0; padding: 0; }
-    #checks li { padding: 3px 0; }
+    #checks:empty { display: none; }
+    #checks li { padding: 3px 0; break-inside: avoid; }
     .lv-ok::before { content: "● "; color: var(--ok); }
     .lv-warn::before { content: "● "; color: var(--warn); }
     .lv-fail::before { content: "● "; color: var(--fail); }
+    .lv-pending::before { content: "○ "; color: var(--muted); }
+    .lv-pending { color: var(--muted); }
+    #checks .hint { margin: 3px 0 5px 1.2em; padding: 5px 9px; font-size: 13px; line-height: 1.5; border-radius: 6px; background: #fff6dc; }
+    #checks .lv-fail .hint { background: #fdecec; }
     #warnings { color: #8a5a00; font-size: 13px; margin: 6px 0 0; padding-left: 18px; }
-    #preview { width: 100%; aspect-ratio: 16 / 9; object-fit: contain; background: #222; border-radius: 6px; }
+    #warnings:empty { display: none; }
+    #preview { width: 100%; aspect-ratio: 16 / 9; object-fit: contain; background: #222; border-radius: 6px; margin-top: 8px; }
     .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+    .row.top { margin: 0 0 8px; }
+    .grow { flex: 1; }
+    .voice-btns { display: inline-flex; gap: 8px; white-space: nowrap; flex-shrink: 0; margin-left: auto; }
+    /* 回答工具列：投影／字卡／原文三組，組間空大一點（換行時也對齊左邊） */
+    .row.groups { column-gap: 22px; row-gap: 8px; }
+    .grp { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+    /* 回答區按鈕：白色＝現在能按，灰色＝現在不能按 */
+    #secAnswer button { background: #fff; color: var(--ink); border: 1px solid #b9c4d0; }
+    #secAnswer button:hover:not(:disabled) { background: #eef5ff; border-color: var(--accent); }
+    #secAnswer button:disabled { background: #d3d9e0; color: #7d8a98; border-color: #d3d9e0; }
+    #presentMode { font-weight: 600; }
+    #decks { width: 100%; }
     #pageinfo { font-variant-numeric: tabular-nums; min-width: 6em; text-align: center; }
+    #navBar { justify-content: center; }
+    #navBar button { min-width: 8.5em; }
     select { font: inherit; padding: 6px; max-width: 100%; }
     #run .card { border: 1px solid #e1e6ec; border-radius: 8px; padding: 10px; margin-bottom: 8px; }
     #run .bar { background: #e8edf3; }
     .muted { color: var(--muted); }
-    .phone { display: flex; gap: 12px; align-items: center; word-break: break-all; font-size: 13px; }
-    .phone img { width: 110px; height: 110px; }
+    /* 手機操作：學員手機兩個開關（預設關）＋主持人手機連線（按了才出現一次性 QR Code） */
+    #secPhone button[data-on="1"] { background: #fff; box-shadow: inset 0 0 0 2px var(--accent); }
+    /* 在深色頂端列：按下時用半透明底、白框，字不會被白底吃掉 */
+    #hostPhonePair[aria-pressed="true"] { background: rgba(255,255,255,.18); color: var(--navy-ink); box-shadow: inset 0 0 0 2px #fff; }
     .rate { float: right; font-variant-numeric: tabular-nums; color: var(--muted); }
     textarea { font: inherit; width: 100%; min-height: 4.2em; padding: 8px; border: 1px solid #c9d2dc; border-radius: 8px; resize: vertical; }
     input[type=number] { font: inherit; width: 4.5em; padding: 6px; }
     #phi { color: var(--fail); font-size: 13px; margin-top: 4px; }
-    #drop { border: 2px dashed #c9d2dc; border-radius: 8px; padding: 8px; text-align: center; color: var(--muted); font-size: 13px; margin-top: 8px; }
-    #drop.over { border-color: var(--accent); color: var(--accent); }
+    #phi:empty { display: none; }
     .job { color: var(--accent); font-size: 13px; }
     .ans-card { border-left: 3px solid var(--accent); padding: 4px 10px; margin: 6px 0; }
     .ans-quote { font-size: 13px; color: var(--muted); font-style: italic; }
     .src { font-size: 12px; color: var(--muted); }
+    .src:empty { display: none; }
     .err { color: #8a5a00; }
     .draft { border: 1px solid #e1e6ec; border-radius: 8px; padding: 10px; margin-bottom: 8px; }
     button.danger { background: var(--fail); color: #fff; }
-    header button.quit { background: transparent; color: var(--navy-ink); border: 1px solid rgba(255,255,255,.5); padding: 4px 12px; }
     #quitConfirm { display: none; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 16px; background: #fdecec; border-bottom: 1px solid #f0b8b8; color: #7a1f1f; }
     #quitConfirm.show { display: flex; }
     #quitConfirm b { flex: 1; min-width: 16em; }
     #quitDone { display: none; position: fixed; inset: 0; z-index: 50; background: var(--bg); align-items: center; justify-content: center; flex-direction: column; gap: 8px; font-size: 18px; }
     #quitDone.show { display: flex; }
+    /* 設定與工具（預設收起） */
+    #secTools > .tools { display: grid; grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr); gap: 14px; padding: 0 14px 14px; }
+    #secTools .tool { border-top: 1px solid #e6ebf1; padding-top: 10px; min-width: 0; }
+    #secTools h2 { font-size: 15px; margin: 0 0 6px; }
+    #secTools h2 small { font-size: 12px; font-weight: 400; color: var(--muted); margin-left: 6px; }
+    #secTools .side { display: flex; flex-direction: column; gap: 14px; }
     #secSettings label { display: block; margin: 8px 0 2px; font-size: 13px; color: var(--muted); }
     #secSettings input[type=text] { font: inherit; width: 100%; padding: 6px; border: 1px solid #c9d2dc; border-radius: 6px; }
-    #secSettings .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0 14px; }
+    #secSettings select { width: 100%; }
+    #secSettings .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0 14px; align-items: end; }
     #settingsMsg { margin-top: 8px; font-size: 13px; }
+    .folder-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+    .folder-row #setFolder { word-break: break-all; }
+    #folderMsg.err { color: var(--fail); }
     #settingsMsg.err { color: var(--fail); }
-    #hostPhoneQr { display: none; width: 180px; height: 180px; margin-top: 8px; }
+    #hostPhoneQr { display: none; width: 180px; height: 180px; }
+    /* 主持人手機連線：按頂端按鈕後，在頂端右下方出現的小面板（一次性 QR Code、過期或錯誤訊息） */
+    #hostPhonePanel { display: none; position: fixed; top: 48px; right: 16px; z-index: 40; width: 260px; padding: 12px;
+                      background: #fff; border: 1px solid #c9d2dc; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.18); }
+    #hostPhonePanel.show { display: block; }
     /* 主持人手機（§6.3b）：直向單欄、翻頁鍵固定在下方；不顯示投影片圖 */
     body.phone-host { font-size: 16px; padding-bottom: 76px; }
     body.phone-host .laptop-only, body.phone-host #preview { display: none; }
     body.phone-host header { flex-wrap: wrap; }
-    body.phone-host main { display: flex; flex-direction: column; gap: 12px; padding: 10px; }
-    body.phone-host main > div { display: contents; }
-    body.phone-host main section { margin-top: 0 !important; min-width: 0; }
+    body.phone-host header .spacer { display: none; }
+    body.phone-host main { display: flex; flex-direction: column; align-items: stretch; gap: 12px; padding: 10px; }
+    body.phone-host main > .col { display: contents; }
+    body.phone-host main section { min-width: 0; }
     body.phone-host select { width: 100%; min-width: 0; }
     body.phone-host .row > label { flex: 1 1 100%; min-width: 0; }
-    body.phone-host #secPhoneUrl { order: 8; }
-    body.phone-host #secChecks { order: 9; }
-    body.phone-host #secSettings { order: 10; }
+    body.phone-host #secPhone { order: 8; }
+    body.phone-host #secTools { order: 10; }
+    body.phone-host #secTools > .tools { grid-template-columns: 1fr; }
     body.phone-host #navBar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 20; margin: 0; padding: 10px;
       justify-content: space-between; flex-wrap: nowrap; background: var(--paper); border-top: 1px solid #d6dde6; }
-    body.phone-host #navBar button { flex: 1; padding: 14px 8px; }
+    body.phone-host #navBar button { flex: 1; padding: 14px 8px; min-width: 0; }
   </style>
 </head>
 <body>
-  <header><h1><span class="app-name"></span> · 主持人畫面</h1><span id="conn">連線中…</span><button id="searchToggle" class="quit" title="開放／關閉手機「搜尋網路」（預設關閉）">手機搜尋網路：關</button><button id="phoneToggle" class="quit" title="暫停／恢復手機翻頁、播放、結束簡報">手機投影控制：開</button><button id="quit" class="quit">結束程式</button></header>
+  <header>
+    <h1><span class="app-name"></span> · 主持人畫面</h1>
+    <button id="checksToggle" data-level="pending" aria-expanded="false" aria-controls="secChecks" title="打開左欄的開機自我檢查，看全部項目">
+      <span id="checksSummary">自我檢查：尚無結果</span><span class="caret">▸</span></button>
+    <span class="spacer"></span>
+    <span id="conn">連線中…</span>
+    <button id="toolsToggle" class="quit" title="設定、診斷包">⚙ 設定</button>
+    <button id="hostPhonePair" class="quit laptop-only" title="產生一次性 QR Code，讓你的手機也能當主持人畫面">主持人手機連線</button>
+    <button id="quit" class="quit">結束程式</button>
+  </header>
+  <div id="hostPhonePanel" class="laptop-only" role="dialog" aria-label="主持人手機連線">
+    <div><img id="hostPhoneQr" alt="主持人手機 QR Code">
+      <div id="hostPhoneMsg" class="src"></div></div>
+  </div>
   <div id="quitConfirm" role="alertdialog" aria-labelledby="quitAsk">
     <b id="quitAsk">確定要結束<span class="app-name"></span>嗎？投影、語音與手機作答都會停止。</b>
     <button id="quitYes" class="danger">確定結束</button>
@@ -81,22 +159,30 @@
   </div>
   <div id="quitDone"><b><span class="app-name"></span>已結束</b><span class="muted">投影與主持人視窗會自動關閉；要再用請雙擊桌面的捷徑。</span></div>
   <main>
-    <div>
-      <section id="secChecks">
-        <h2>開機自我檢查</h2>
-        <ul id="checks"><li class="muted">尚無結果</li></ul>
+    <div class="col">
+      <section id="secChecks" data-level="pending">
+        <button id="checksFold" aria-expanded="false" aria-controls="checks" title="展開／收起全部項目（含綠燈）"><span class="caret">▶</span>開機自我檢查<span id="checksFoldStatus" class="fold-status"></span></button>
+        <ul id="checks"></ul>
         <ul id="warnings"></ul>
       </section>
-      <section style="margin-top:14px">
+      <section id="secFolder">
+        <h2>資料夾<small>簡報、參考資料、題庫、紀錄都放在這裡</small></h2>
+        <div class="folder-row"><span id="setFolder" class="src"></span>
+          <button id="setFolderPick" type="button">更換資料夾…</button></div>
+        <div id="folderMsg" class="src"></div>
+      </section>
+      <section id="secDeck">
         <h2>簡報</h2>
-        <div id="presentMode" class="src">投影幕：主畫面</div>
-        <div class="row">
-          <button id="presentStop" class="secondary" disabled>回到主畫面</button>
+        <div class="row top">
+          <span id="presentMode">投影幕：主畫面</span>
+          <span class="grow"></span>
           <button id="present" style="display:none">播放簡報</button>
+          <button id="presentStop" class="secondary" disabled>回到主畫面</button>
         </div>
-        <div id="deckCands" class="src"></div>
         <select id="decks"></select>
-        <img id="preview" alt="" style="margin-top:8px">
+        <div id="deckCands" class="src"></div>
+        <div id="deckConv" class="src"></div>
+        <img id="preview" alt="">
         <div class="row" id="navBar">
           <button id="prev" class="secondary">◀ 上一頁</button>
           <span id="pageinfo">—</span>
@@ -104,29 +190,22 @@
         </div>
         <div id="ocr" class="src"></div>
       </section>
-      <section id="secPhoneUrl" style="margin-top:14px">
-        <h2>手機作答網址</h2>
-        <div id="phone" class="phone muted">通道尚未就緒</div>
-      </section>
-      <section class="laptop-only" style="margin-top:14px">
-        <h2>主持人手機（手機掃描後也能當主持人畫面）</h2>
-        <div id="hostPhoneStatus" class="src">尚未連接</div>
-        <div class="row">
-          <button id="hostPhonePair" class="secondary">連接主持人手機</button>
-          <button id="hostPhoneRevoke" class="secondary" style="display:none">解除手機</button>
+      <section id="secPhone">
+        <h2>手機操作<small>學員掃投影幕右下角的 QR Code 連線</small></h2>
+        <div class="row top">
+          <button id="searchToggle" class="secondary" title="開放／關閉學員手機「搜尋文獻」（預設關閉）">手機搜尋文獻：關</button>
+          <button id="phoneToggle" class="secondary" title="開放／關閉學員手機翻頁、播放、結束簡報（預設關閉）">手機投影控制：關</button>
         </div>
-        <img id="hostPhoneQr" alt="主持人手機 QR Code">
-        <div id="hostPhoneMsg" class="src"></div>
       </section>
     </div>
-    <div>
-      <section>
-        <h2>語音助理</h2>
-        <div class="row" style="margin:0 0 8px">
+    <div class="col">
+      <section id="secVoice">
+        <div class="row top">
+          <h2 style="margin:0">語音助理</h2>
           <span id="voiceStatus" class="muted">語音未啟用</span>
-          <span style="flex:1"></span>
-          <button id="voiceWake">叫醒<span class="app-name"></span></button>
-          <button id="voiceStop" class="secondary">停止</button>
+          <span class="grow"></span>
+          <span class="voice-btns"><button id="voiceWake">叫醒<span class="app-name"></span></button>
+            <button id="voiceStop" class="secondary">停止</button></span>
         </div>
         <div id="voicePhi" class="err" style="display:none">● 剛剛那句可能含識別資訊（未轉送查詢）
           <button id="voicePhiClear" class="secondary">清除</button></div>
@@ -137,74 +216,89 @@
           <button id="voiceConfirmCancel" class="secondary">取消</button></div>
         <div id="voiceRef" class="muted"></div>
         <div id="voiceCands"></div>
-        <div class="src" style="margin-top:6px">口頭內容未經驗證，以投影字卡為準：</div>
+        <div class="src">語音辨識文字（口頭內容未經驗證，以投影字卡為準）：</div>
         <div id="voiceTranscript" class="src" style="max-height:9em;overflow:auto"></div>
-      </section>
-      <section style="margin-top:14px">
-        <h2>問<span class="app-name"></span>（打字內容送出前會先檢查病人識別資訊）</h2>
-        <textarea id="askText" placeholder="輸入去識別化的臨床問題，或出題重點（Ctrl+Enter 送出問題）"></textarea>
+        <div class="src" style="margin-top:8px">打字發問（送出前會先檢查病人識別資訊）</div>
+        <textarea id="askText" placeholder="輸入去識別化的臨床問題（Ctrl+Enter 送出）"></textarea>
         <div id="phi"></div>
         <div class="row">
           <label>來源 <select id="route"></select></label>
           <button id="ask">問</button>
-          <span style="flex:1"></span>
-          <label>題數 <input id="qn" type="number" min="1" max="20" value="5"></label>
-          <button id="gen" class="secondary">出題</button>
         </div>
         <div id="jobs"></div>
-        <div id="drop">把 PDF／pptx 拖到這裡，加入「參考資料」</div>
       </section>
-      <section style="margin-top:14px">
-        <h2>與會人員提問（手機「詢問老師」，只有你看得到）</h2>
-        <div id="teacherList"><p class="muted">還沒有提問</p></div>
-      </section>
-      <section style="margin-top:14px">
+      <section id="secAnswer">
         <h2>回答</h2>
-        <div class="row" style="margin:0 0 8px">
-          <button id="showAns" class="secondary">投影回答</button>
-          <button id="hideAns">收起回答</button>
-          <button id="makeCard" class="secondary">整理成字卡</button>
-          <button id="hideCard" class="secondary">收回字卡</button>
-          <span id="cardMsg" class="src"></span>
-          <button id="quotes" class="secondary">投影顯示原文</button>
-          <button id="sourceClose" style="display:none">關閉原文</button>
-          <button id="summaryStart" class="secondary" style="display:none">整理重點</button>
-          <button id="summaryCancel" class="secondary" style="display:none">取消整理</button>
-          <span id="sourceMsg" class="src"></span>
+        <div class="row top groups">
+          <span class="grp"><button id="showAns" disabled>投影回答</button>
+            <button id="hideAns" disabled>收起回答</button></span>
+          <span class="grp"><button id="quotes" disabled>投影顯示原文</button>
+            <button id="sourceClose" disabled>關閉原文</button>
+            <button id="summaryStart" disabled>整理重點</button></span>
         </div>
+        <div id="cardMsg" class="src"></div>
+        <div id="sourceMsg" class="src"></div>
         <div id="answer"><p class="muted">尚未發問</p></div>
       </section>
-      <section style="margin-top:14px">
-        <h2>題目草稿（只有你看得到；按「發出去」才派給大家）</h2>
-        <div id="draftNotes" class="muted"></div>
-        <div class="row" style="margin:0 0 8px"><button id="publish">發出去</button></div>
-        <div id="drafts"><p class="muted">沒有草稿</p></div>
+      <section id="secTeacher">
+        <h2>與會人員提問<small>手機「詢問老師」，只有你看得到</small></h2>
+        <div id="teacherList"><p class="muted">還沒有提問</p></div>
       </section>
-      <section style="margin-top:14px">
-        <h2>作答（主持人可見正解，投影幕看不到）</h2>
-        <div class="row" style="margin:0 0 10px">
+      <details id="secQuiz" class="fold">
+        <summary>出題與作答<span id="quizSummary" class="fold-status"></span></summary>
+        <div class="fold-body">
+        <h3>出題<small>草稿只有你看得到；題目送出前會先檢查病人識別資訊</small></h3>
+        <input id="quizFocus" type="text" placeholder="出題重點（可留空，例如：SRNS 的第二線治療）" autocomplete="off" style="width:100%">
+        <div id="quizPhi"></div>
+        <div class="row">
+          <label>來源 <select id="quizRoute"></select></label>
+          <label>題數 <input id="qn" type="number" min="1" max="20" value="5"></label>
+          <button id="gen">出題</button>
+        </div>
+        <div id="quizJobs"></div>
+        <h3>題目草稿<small>只有你看得到；按「發出去」才派給大家</small></h3>
+        <div id="draftNotes" class="muted"></div>
+        <div class="row top"><button id="publish">發出去</button></div>
+        <div id="drafts"><p class="muted">沒有草稿</p></div>
+        <h3>作答<small>主持人可見正解，投影幕看不到</small></h3>
+        <div class="row top">
           <button id="dispatch">派出本頁題目</button>
           <button id="reveal">公布答案</button>
           <button id="collect">收卷</button>
           <button id="hide" class="secondary">收起抽屜</button>
         </div>
         <div id="run"><p class="muted">目前沒有題目</p></div>
-      </section>
+        </div>
+      </details>
     </div>
-    <section id="secSettings" style="grid-column: 1 / -1">
-      <h2>設定</h2>
-      <div class="grid">
-        <div><label for="setName">名字（1 到 10 字）</label><input id="setName" type="text" maxlength="10" autocomplete="off"></div>
-        <div><label for="setWake">喚醒詞（2 到 4 個中文字；空白＝同名字）</label><input id="setWake" type="text" maxlength="4" autocomplete="off"></div>
-        <div><label for="setSpecialty">科別（例：兒童腎臟科）</label><input id="setSpecialty" type="text" autocomplete="off"></div>
-        <div><label for="setMeeting">會議類型</label><select id="setMeeting"></select>
-          <input id="setMeetingOther" type="text" placeholder="輸入會議名稱" autocomplete="off" style="display:none;margin-top:6px"></div>
+    <details id="secTools" class="fold span-all">
+      <summary>⚙ 設定與工具<small>名字、喚醒詞、麥克風／喇叭、診斷包</small></summary>
+      <div class="tools">
+        <div id="secSettings" class="tool">
+          <h2>設定</h2>
+          <div class="grid">
+            <div><label for="setName">名字（1 到 10 字）</label><input id="setName" type="text" maxlength="10" autocomplete="off"></div>
+            <div><label for="setWake">喚醒詞（2 到 4 個中文字；空白＝同名字）</label><input id="setWake" type="text" maxlength="4" autocomplete="off"></div>
+            <div><label for="setSpecialty">科別（例：兒童腎臟科）</label><input id="setSpecialty" type="text" autocomplete="off"></div>
+            <div><label for="setMeeting">會議類型</label><select id="setMeeting"></select>
+              <input id="setMeetingOther" type="text" placeholder="輸入會議名稱" autocomplete="off" style="display:none;margin-top:6px"></div>
+            <div><label for="setMic">麥克風（換了要重新啟動）</label><select id="setMic"></select></div>
+            <div><label for="setSpeaker">喇叭（換了要重新啟動）</label><select id="setSpeaker"></select></div>
+            <div><label for="setWakeSens">喚醒靈敏度（常叫不醒就調高；換了要重新啟動）</label><select id="setWakeSens"></select></div>
+          </div>
+          <div class="src" style="margin-top:6px">新插上的麥克風或喇叭，要重新啟動程式才會出現在選單裡。</div>
+          <div class="row"><button id="settingsSave">儲存</button></div>
+          <div id="settingsMsg" class="src"></div>
+        </div>
+        <div class="side">
+          <div class="tool">
+            <h2>診斷包</h2>
+            <div class="row" style="margin-top:0"><button id="diagBtn" class="secondary">產生診斷包</button></div>
+            <div id="diagMsg" class="src">遇到問題時按一下，會在桌面產生一個 zip 檔，請寄給開發者。</div>
+          </div>
+        </div>
       </div>
-      <div class="row"><button id="settingsSave">儲存</button></div>
-      <div id="settingsMsg" class="src"></div>
-      <div class="row"><button id="diagBtn" class="secondary">產生診斷包</button></div>
-      <div id="diagMsg" class="src">遇到問題時按一下，會在桌面產生一個 zip 檔，請寄給開發者。</div>
-    </section>
+    </details>
   </main>
   <script src="/static/quizview.js"></script>
   <script src="/static/host.js"></script>

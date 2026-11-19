@@ -19,6 +19,13 @@ _PAGE_LINES = ["x ià y ī y è @下一頁", "x ià y í y è @下一頁",
                "sh àng y ī y è @上一頁", "sh àng y í y è @上一頁"]
 # 變調字：除預設讀音外再收的聲調（「一」「不」依後字變調）
 _TONE_VARIANTS = {"一": ["ī", "í", "ì"], "不": ["ù", "ú"]}
+# 第三聲在句中常唸成半上聲，模型常聽成別的聲調：第三聲的字四個聲調都收（2026-11-18 實機「賈維斯」偶爾叫不醒）
+_TONES = ("āáǎà", "ēéěè", "īíǐì", "ōóǒò", "ūúǔù", "ǖǘǚǜ")
+# 喚醒靈敏度（sherpa-onnx 關鍵詞行的 :加權 #門檻），只套用在喚醒詞；「下一頁」「上一頁」維持全域設定。
+# 低＝原本的全域設定；高＝合成語音小聲＋雜訊時叫醒最多，40 段易混淆句仍沒誤叫醒（2026-11-18 比較）
+SENSITIVITY = {"low": (1.0, 0.25), "medium": (1.5, 0.2), "high": (3.0, 0.05)}
+DEFAULT_SENSITIVITY = "medium"
+WAKE_BOOST, WAKE_THRESHOLD = SENSITIVITY[DEFAULT_SENSITIVITY]
 
 _TOKENS = "tokens.txt"
 _ENCODER = "encoder-epoch-13-avg-2-chunk-16-left-64.int8.onnx"
@@ -49,8 +56,17 @@ def validate_wake_word(word: str) -> str | None:
     return None
 
 
+def _third_tone_variants(final: str) -> list[str]:
+    """第三聲的韻母回傳另外三個聲調的寫法；其他聲調回傳空清單。"""
+    for tones in _TONES:
+        if tones[2] in final:
+            return [final.replace(tones[2], t) for t in tones if t != tones[2]]
+    return []
+
+
 def wake_token_lines(word: str) -> list[str]:
-    """把中文喚醒詞轉成 sherpa-onnx 關鍵詞行（"<tokens> @<word>"）；「一」「不」加變調版本。"""
+    """把中文喚醒詞轉成 sherpa-onnx 關鍵詞行（"<tokens> @<word>"）；預設讀音排第一，
+    「一」「不」加變調版本，第三聲的字四個聲調都收。"""
     from itertools import product
 
     from pypinyin import Style, pinyin
@@ -60,7 +76,8 @@ def wake_token_lines(word: str) -> list[str]:
     per_char: list[list[list[str]]] = []
     for ch, i, f in zip(word, inits, finals):
         init, final = i[0], f[0]
-        finals_opts = [final] + [v for v in _TONE_VARIANTS.get(ch, []) if v != final]
+        extra = _TONE_VARIANTS.get(ch) or _third_tone_variants(final)
+        finals_opts = [final] + [v for v in extra if v != final]
         per_char.append([([init] if init else []) + [v] for v in finals_opts])
     lines: list[str] = []
     for combo in product(*per_char):
@@ -70,8 +87,14 @@ def wake_token_lines(word: str) -> list[str]:
     return lines
 
 
-def keyword_lines(word: str) -> list[str]:
-    return wake_token_lines(word) + _PAGE_LINES
+def _boosted(line: str, sensitivity: str = DEFAULT_SENSITIVITY) -> str:
+    boost, threshold = SENSITIVITY.get(sensitivity, SENSITIVITY[DEFAULT_SENSITIVITY])
+    return line.replace(" @", f" :{boost} #{threshold} @", 1)
+
+
+def keyword_lines(word: str, sensitivity: str = DEFAULT_SENSITIVITY) -> list[str]:
+    """關鍵詞檔的內容：喚醒詞（依靈敏度加權、調門檻）＋翻頁指令。不認得的靈敏度＝中。"""
+    return [_boosted(l, sensitivity) for l in wake_token_lines(word)] + _PAGE_LINES
 
 
 def _vocab(tokens_file: Path) -> set[str]:
@@ -84,7 +107,8 @@ def model_files_ok(model_dir: Path) -> bool:
 
 
 class WakeWordDetector:
-    def __init__(self, model_dir: Path, threshold: float, score: float, wake_word: str):
+    def __init__(self, model_dir: Path, threshold: float, score: float, wake_word: str,
+                 sensitivity: str = DEFAULT_SENSITIVITY):
         d = Path(model_dir)
         if not model_files_ok(d):
             raise WakeWordError(f"找不到喚醒詞模型：{d}")
@@ -100,7 +124,8 @@ class WakeWordDetector:
         # 丟掉詞表沒有的變調版本（預設讀音一定要在）
         wake_lines = [ln for ln in wake_lines if all(t in vocab for t in ln.split(" @")[0].split())]
         keywords = d / "keywords_xs.txt"
-        keywords.write_text("\n".join(wake_lines + _PAGE_LINES) + "\n", encoding="utf-8")
+        keywords.write_text("\n".join([_boosted(l, sensitivity) for l in wake_lines] + _PAGE_LINES) + "\n",
+                            encoding="utf-8")
         self._spotter = sherpa_onnx.KeywordSpotter(
             tokens=str(d / _TOKENS), encoder=str(d / _ENCODER), decoder=str(d / _DECODER),
             joiner=str(d / _JOINER), keywords_file=str(keywords),

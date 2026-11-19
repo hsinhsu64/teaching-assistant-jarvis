@@ -512,3 +512,21 @@ def test_edge_window_window_mode_has_no_fullscreen(tmp_path):
     assert "--start-fullscreen" not in launched[1]
     assert "--app=https://x/" in launched[1] and "--window-position=10,20" in launched[1]
     assert "--window-size=1280,720" in launched[1]
+
+
+def test_open_reference_in_summary_deck_uses_deck_refs(state, tmp_path):
+    # 2026-11-18 審查：摘要簡報（OE 樣式、kind="summary"）的 [1] 是這份簡報的文獻，不是目前清單的第 1 篇
+    from xiaoshen.source_text import SourceDoc
+    from xiaoshen.summary import Summary, SummaryPoint, SummarySlide
+    from xiaoshen.summary_oe import render_summary_oe_deck
+
+    paper = {"title": "Summary deck paper", "doi": "10.1/s", "pmid": "", "href": ""}
+    s = Summary(SourceDoc("Summary deck paper", "c", ["t"], paged=True, full_text=True, origin="pmc"),
+                [SummarySlide("重點", [SummaryPoint("a", ["t"], 1, True)])], None, "m", "study")
+    pdf = tmp_path / "s.pdf"
+    render_summary_oe_deck(s, paper, pdf)
+    state.play_summary(pdf)
+    _oe_answer(state, [{"index": 1, "title": "List paper", "doi": "10.1/list", "pmid": "", "href": ""}])
+    web = FakeWeb()
+    assert viewer(state, web=web).open_reference("n:1")["status"] == "ok"
+    assert web.opened == ["https://doi.org/10.1/s"]

@@ -21,7 +21,7 @@ TEACHER_SECONDS = 15        # 「詢問老師」同一支手機兩題之間
 NAV_SECONDS = 0.5           # 翻頁最快間隔（全部手機合計）
 PLAY_SECONDS = 3.0          # 播放／結束最快間隔（全部手機合計）
 PAUSED = "主持人已暫停手機投影控制"
-SEARCH_OFF = "主持人未開放手機搜尋網路"
+SEARCH_OFF = "主持人未開放手機搜尋文獻"
 PHONE_ROUTES = ("openevidence",)  # 「搜尋網路」只查文獻（2026-11-05 修訂）
 TODAY = "今天的簡報"
 
@@ -160,7 +160,9 @@ class PhoneControl:
             path = self._deck_path(name)
             if path is None:
                 return _msg("not_found", "找不到這份簡報")
-            st.play(path)
+            result = st.request_deck(path, play=True)
+            if result != "ready":
+                return st.deck_request_reply(result)
             ok = st.presenting
         elif kind == "oe":
             if st.oe_pending is not None:
@@ -193,6 +195,6 @@ class PhoneControl:
     def _deck_path(self, name: str) -> Path | None:
         st = self.state
         name = (name or "").strip()
-        if name == TODAY and st.answer_deck is not None:
-            return Path(st.answer_deck.path)
+        if name == TODAY and st.today_deck_path() is not None:
+            return st.today_deck_path()
         return next((p for p in st.deck_paths if p.stem == name), None)

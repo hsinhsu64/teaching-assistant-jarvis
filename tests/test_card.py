@@ -86,4 +86,5 @@ def test_card_marks_derivations_unconfirmed():
                derivations=[Derivation("AG = 13.6", [0], ["今天的簡報 第 28 頁"])],
                derivation_notes=["此為靜脈血，未推導代償"])
     h = card_html(a)
-    assert "未經主治確認" in h and "此為靜脈血，未推導代償" in h
+    # 推導本身照列（標未經主治確認）；「為什麼沒推導」的說明只留在主持人畫面（2026-11-18）
+    assert "未經主治確認" in h and "AG = 13.6" in h and "此為靜脈血，未推導代償" not in h

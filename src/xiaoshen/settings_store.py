@@ -71,4 +71,35 @@ def validate(values: dict) -> dict[str, str]:
             errors["wake_word"] = f"名字不能當喚醒詞（{reason}），請另外填喚醒詞"
     if values.get("meeting_type") not in MEETING_TYPES:
         errors["meeting_type"] = "請選擇會議類型"
+    for key in DEVICE_KEYS:
+        device = values.get(key)
+        if device is not None and (len(device) > DEVICE_MAX or "\n" in device or "\r" in device):
+            errors[key] = "裝置名稱不正確，請從選單重新選擇"
+    sensitivity = values.get("wake_sensitivity")
+    if sensitivity is not None and sensitivity not in SENSITIVITY_LABELS:
+        errors["wake_sensitivity"] = "請從選單選擇喚醒靈敏度"
     return errors
+
+
+SENSITIVITY_LABELS = {"low": "低（較少誤叫醒）", "medium": "中（預設）", "high": "高（較少漏聽）"}
+
+
+def sensitivity_options() -> list[dict]:
+    return [{"value": k, "label": v} for k, v in SENSITIVITY_LABELS.items()]
+
+
+DEVICE_KEYS = ("audio_device", "speaker_device")
+DEVICE_MAX = 100
+
+
+def device_options(saved: str, names: list[str]) -> list[dict]:
+    """麥克風／喇叭選單：「電腦預設」在最前面。
+
+    已存的值是名稱片段（例如 USBMIC）時，對到的那一項沿用原值，存檔不會改寫設定；
+    已存的裝置目前沒接上也照樣列出，不會被悄悄換掉。"""
+    options = [{"value": "", "label": "電腦預設"}]
+    match = next((n for n in names if saved and saved.lower() in n.lower()), None)
+    if saved and match is None:
+        options.append({"value": saved, "label": f"{saved}（目前沒有接上）"})
+    options += [{"value": saved if n == match else n, "label": n} for n in names]
+    return options

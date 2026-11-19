@@ -13,7 +13,7 @@ from pathlib import Path
 
 from . import eventlog
 from . import persona
-from .answering import derived_label, note_label
+from .answering import derived_label
 from .jobs import JobRunner
 from .library import Library, rank_names
 from .live_backend import ToolCall
@@ -24,9 +24,13 @@ from .state import AppState
 _SYSTEM_INSTRUCTION = (
     "你是{ctx}的助理{name}，只能用繁體中文（台灣用語）說話，絕對不要說日文、韓文或其他語言；"
     "藥名、劑量、疾病名維持英文，語氣簡短。\n"
-    "一、你不得用自己的知識回答任何醫學或臨床內容。任何臨床問題一律呼叫 ask 工具；呼叫前先說一句「我查一下」。"
+    "一、先判斷問題的類型：問你自己（介紹你自己、你會做什麼）呼叫 about_me；"
+    "about_me 回傳後一定要把 message 完整唸出來（status 是 speak），這是唯一要唸出內容的工具，不受「預設不念」限制；"
+    "問投影上已列出的文獻、結果、第 N 篇（例如哪一篇最新、第 3 篇是哪個期刊、哪幾篇是隨機對照試驗）呼叫 ask_results，"
+    "question 照使用者的話寫；其他臨床問題才呼叫 ask。"
+    "你不得用自己的知識回答任何醫學或臨床內容。任何臨床問題一律呼叫 ask 工具；呼叫前先說一句「我查一下」。"
     "要求整理資料內容（例如列出重點、摘要、列出可以討論的討論主題、比較、解釋這頁）也一律呼叫 ask"
-    "（說「這份簡報」「簡報內容」時 source 填 deck，「這頁」填 page），question 照使用者的要求寫；"
+    "（說「今天的簡報」「這份簡報」「簡報」「簡報內容」時 source 填 deck，「這頁」填 page），question 照使用者的要求寫；"
     "不得自己回答無法提供或聽不懂，除非真的聽不清楚。\n"
     "二、ask 回傳後只照念 message（一句話：找到幾張字卡、已投影，有警示也寫在 message 裡），"
     "預設不要念字卡內容、不要念出處（使用者決定：所有回答預設不念）；不得增加、推論或補充。"
@@ -36,6 +40,10 @@ _SYSTEM_INSTRUCTION = (
     "ask 回傳 confirm_query 時照念 message（念出要查的問題）並等對方回答：對方說「對」「沒錯」「查吧」才再呼叫 ask，"
     "question 照剛剛那句、帶 confirmed=true；對方說出正確的詞就用改好的問題再呼叫 ask（不帶 confirmed）；"
     "對方說不要、取消就不查。不得自己替對方確認。"
+    "要求摘要或整理已列出的第 N 篇（例如「摘要第 14 篇和第 15 篇」）時，呼叫 summarize_papers"
+    "（numbers 照順序填使用者說的所有篇號），立刻照念 message；整理在背景進行，好了會自動播放，不必再說話。"
+    "ask_results 回傳 needs_reading 時照念 message（「我讀一下文獻再回答」），再呼叫 read_results，question 照同一句；"
+    "ask_results、read_results 的其他結果也只照念 message，預設不念內容，使用者要求才呼叫 read_answer。"
     "回傳 not_found、clarify、choose、blocked、expired 或 error 時，照念 message。"
     "使用者問「這張」「這頁」「這張投影片」的內容時，ask 的 source 填 page。\n"
     "三、使用者要求出題時呼叫 make_quiz，並說明草稿已送到主持人畫面，需主持人審閱後才會發出。\n"
@@ -56,17 +64,34 @@ _SYSTEM_INSTRUCTION = (
     "九、唯一例外：投影上已打開原文時，要求「整理這篇／這份原文的重點」「把原文做摘要」時，先說「我讀一下」再呼叫 summarize_source（不是 ask）；"
     "完成時只念 message，不要念簡報內容。要求「播放摘要簡報」「再看一次摘要」時呼叫 play_deck，name 填「摘要簡報」；"
     "「播放 OE 簡報」時 name 填「OE 簡報」。"
-    "摘要簡報播放中要求「關閉摘要」「關閉原文」「關掉摘要簡報」時呼叫 close_source。"
+    "摘要簡報播放中要求「關閉摘要」「關閉原文」「關掉摘要簡報」時呼叫 close_source。\n"
+    "十、使用者要求結束程式、關閉程式、關掉{name}時呼叫 quit_app；回傳 confirm_quit 時照念 message 並等對方回答，"
+    "對方說「確定結束」才再呼叫 quit_app 並帶 confirm=true；對方說不要、取消就不呼叫。不得自己替對方確認。"
+    "其他狀態照念 message。"
 )
 
 _SOURCE = {"type": "string", "enum": ["openevidence", "pubmed", "references", "deck", "page"],
            "description": "openevidence=搜尋文獻（未指定資料時，查不到會自動再查 PubMed）；pubmed=使用者指定查 PubMed；"
                           "references=參考資料；deck=今天的簡報；page=目前這一頁"}
 
+# 名字裡容易唸錯的字（實機：「賈維斯」的「賈」聽起來像「加」）
+_PRONOUNCE = {"賈": "唸第三聲（jiǎ，和「假」同音），不要唸成「加」（jiā）"}
+
+
 def system_instruction() -> str:
     p = persona.current()
-    return (_SYSTEM_INSTRUCTION.replace("{ctx}", persona.context(p)).replace("{name}", p.display_name)
+    text = (_SYSTEM_INSTRUCTION.replace("{ctx}", persona.context(p)).replace("{name}", p.display_name)
             .replace("{wake}", persona.wake_word()))
+    notes = [f"「{ch}」{how}" for ch, how in _PRONOUNCE.items() if ch in p.display_name]
+    if notes:
+        text += f"\n十一、說出自己的名字「{p.display_name}」時，" + "；".join(notes) + "。"
+    return text
+
+
+def about_me_text() -> str:
+    p = persona.current()
+    return (f"我是{p.display_name}，{persona.context(p)}的助理。說「{persona.wake_word()}」叫醒我就可以發問："
+            "我可以查文獻、整理今天的簡報或參考資料、出題、翻頁，查到的結果會投影成附出處的字卡。")
 
 
 TOOLS: list[dict] = [
@@ -77,6 +102,16 @@ TOOLS: list[dict] = [
          "confirmed": {"type": "boolean",
                        "description": "上一次回傳 confirm_query 後，使用者已說「對」確認要查這句"}},
          "required": ["question"]}},
+    {"name": "about_me", "description": "使用者要你介紹自己、問你是誰或會做什麼：回傳自我介紹",
+     "parameters": {"type": "object", "properties": {}}},
+    {"name": "ask_results", "description": "問投影上已列出的文獻（哪一篇最新、第 N 篇的期刊或作者、幾篇、哪幾篇是某種研究）；不重新搜尋",
+     "parameters": {"type": "object", "properties": {"question": {"type": "string"}}, "required": ["question"]}},
+    {"name": "summarize_papers", "description": "摘要／整理投影上已列出的第 N 篇文獻，做成摘要簡報並播放（一次只做 1 篇）",
+     "parameters": {"type": "object", "properties": {"numbers": {
+         "type": "array", "items": {"type": "integer"}, "description": "使用者說的篇號，照順序全部填"}},
+         "required": ["numbers"]}},
+    {"name": "read_results", "description": "ask_results 回傳 needs_reading 後呼叫：讀已列出文獻的摘要再回答",
+     "parameters": {"type": "object", "properties": {"question": {"type": "string"}}, "required": ["question"]}},
     {"name": "make_quiz", "description": "依來源出 n 題選擇題草稿，送到主持人畫面審閱",
      "parameters": {"type": "object", "properties": {
          "n": {"type": "integer"}, "source": _SOURCE, "reference_name": {"type": "string"},
@@ -107,7 +142,14 @@ TOOLS: list[dict] = [
                     "required": ["number"]}},
     {"name": "read_answer", "description": "使用者要求才念：念出字卡內容（card=0 全部、N 第 N 張）；OE 簡報播放中念目前這一頁",
      "parameters": {"type": "object", "properties": {"card": {"type": "integer", "description": "第幾張，0 為全部"}}}},
+    {"name": "quit_app", "description": "結束整個程式（投影、語音、手機作答都停止）；第一次呼叫只會請使用者確認",
+     "parameters": {"type": "object", "properties": {
+         "confirm": {"type": "boolean", "description": "上一次回傳 confirm_quit 後，使用者已親口說「確定結束」"}}}},
 ]
+
+QUIT_CONFIRM_TTL = 15.0  # 從助理問「確定要結束嗎」起算；扣掉問句約 3 秒，使用者約有 10 秒回答
+VOICE_QUIT_DELAY = 3.0   # 確認後等多久才關：先讓助理說完「程式即將結束」
+QUIT_ASK = {"status": "confirm_quit", "message": "確定要結束程式嗎？請說「確定結束」"}
 
 TODAY_DECK = ("今天的簡報", "今天", "這份")
 SUMMARY_DECK = ("摘要簡報", "摘要")
@@ -131,6 +173,47 @@ def english_terms(text: str) -> set[str]:
     return {w.lower() for w in _ENGLISH.findall(text or "") if len(w) >= 2 and w.lower() not in _NOT_TERMS}
 
 
+# 後端保險：模型沒指定來源（預設送 OpenEvidence）時，用字詞判斷其實是問簡報或目前列出的文獻
+_DECK_INTENT = re.compile(r"今天的簡報|這份簡報|簡報(的)?內容|簡報(的)?重點")
+_RESULTS_INTENT = re.compile(r"你列出|剛剛(的|那些|那幾)?(文獻|結果|字卡|文章)|這(幾|些)(篇|文獻|文章)"
+                             r"|第\s*[0-9一二三四五六七八九十]+\s*篇|(上面|清單|列出).*哪一?篇"
+                             r"|哪一?篇(是|的)?最(新|舊|早|晚|大|多|少|近)")  # 單獨的「哪一篇」常是一般臨床問題
+
+
+_SUMMARY_WORDS = re.compile(r"摘要|整理|重點")
+_PAPER_SPAN = re.compile(r"第([\s0-9一二三四五六七八九十和、,，與及]+)篇")
+_CN_DIGITS = {c: i for i, c in enumerate("一二三四五六七八九", 1)}
+
+
+def _cn_number(s: str) -> int:
+    if s.isdigit():
+        return int(s)
+    if "十" in s:  # 十、十四、二十、二十三
+        tens, _, ones = s.partition("十")
+        return (_CN_DIGITS.get(tens, 1) if tens else 1) * 10 + (_CN_DIGITS.get(ones, 0) if ones else 0)
+    return _CN_DIGITS.get(s, 0)
+
+
+def paper_numbers(question: str) -> list[int]:
+    """「第 14 篇和第 15 篇」「第14、15篇」「第三篇」→ 篇號（依說的順序，不重複）。"""
+    nums = [_cn_number(x) for m in _PAPER_SPAN.finditer(question)
+            for x in re.findall(r"[0-9]+|[一二三四五六七八九十]+", m.group(1))]
+    return list(dict.fromkeys(n for n in nums if n > 0))
+
+
+def summary_intent(question: str) -> bool:
+    """要摘要／整理列出的第 N 篇（做成摘要簡報，不是字卡）。"""
+    return bool(_SUMMARY_WORDS.search(question)) and bool(paper_numbers(question))
+
+
+def deck_intent(question: str) -> bool:
+    return bool(_DECK_INTENT.search(question))
+
+
+def results_intent(question: str) -> bool:
+    return bool(_RESULTS_INTENT.search(question))
+
+
 def needs_confirm(question: str) -> bool:
     return bool(english_terms(question))
 
@@ -139,6 +222,11 @@ BLOCKED = {"status": "blocked", "message": "剛剛那句可能含病人識別資
 REFUSED = {"status": "refused", "message": "請用主持人畫面操作"}
 ALREADY_DONE = {"status": "already_done", "message": ""}  # 沒有新的話卻又要翻頁：不翻、不出聲
 PAGE_LOG_ARGS = {"goto_page", "play_deck"}  # 只有這些工具的參數記進記錄（其他可能含問題內容）
+RESULTS_REPLY = {
+    "no_results": {"status": "no_results", "message": "目前投影上沒有文獻清單"},
+    "needs_reading": {"status": "needs_reading", "message": "我讀一下文獻再回答"},
+    "superseded": {"status": "error", "message": "被新的問題取代"},
+}
 DRAFTS_BUSY = {"status": "refused", "message": "主持人畫面已有題目草稿或正在出題，請主持人先處理"}
 
 
@@ -152,10 +240,15 @@ class VoiceTools:
         self._heard = 0               # 收到幾段使用者的話（不分輪）
         self._heard_at_move: int | None = None  # 上次翻頁時的 _heard；翻頁要有新的話（實機一直往下翻）
         self._heard_at_confirm: int | None = None  # 念出「要查的是…對嗎」時的 _heard；確認要有新的話
+        self.clock = time.monotonic
+        self._quit_asked_at: float | None = None  # 問「確定要結束嗎」的時間；None＝沒有待確認的結束
+        self._quit_reply = ""                     # 問完之後使用者說的話：要親口說「確定」才關
 
     def hear(self, text: str) -> None:
         self.turn_text += text
         self._heard += 1
+        if self._quit_asked_at is not None:
+            self._quit_reply += text
 
     def _repeat_move(self) -> bool:
         return self._heard_at_move is not None and self._heard == self._heard_at_move
@@ -221,6 +314,13 @@ class VoiceTools:
         if self._phi_blocked(question, reference_name):
             return self._alert()
         source = self._route(source, reference_name)
+        if source == "openevidence":  # 沒指定來源：模型可能選錯工具，用字詞改正
+            if summary_intent(question):  # 沒有清單時由 _summarize_papers 回「目前投影上沒有文獻清單」
+                return self._summarize_papers(paper_numbers(question))
+            if deck_intent(question):
+                source = "deck"
+            elif results_intent(question) and self.state.results_base is not None:
+                return self._ask_results(question)
         refs, early = self._resolve_refs(source, reference_name)
         if early:
             return early
@@ -245,6 +345,74 @@ class VoiceTools:
                 return {"status": status if status != "oe_playing" else "answered",
                         "message": f"{note}，{said}" if note else said}
             said = f"找到 {len(ans.cards)} 張字卡，已投影"
+            return {"status": "answered", "message": f"{note}，{said}" if note else said}
+        message = {"not_found": ans.summary_zh, "clarify": ans.clarify_zh}.get(ans.status, ans.error)
+        return {"status": ans.status, "message": message, "cards": []}
+
+    # ---- 問題分類型：介紹自己、問目前列出的文獻（不重新搜尋） ----
+
+    def _about_me(self) -> dict:
+        return {"status": "speak", "message": about_me_text()}  # 回 ok 時模型曾拿到卻沒唸（實機 2026-11-19）
+
+    def _ask_results(self, question: str) -> dict:
+        if self._phi_blocked(question):
+            return self._alert()
+        if summary_intent(question) and self.state.results_base is not None:
+            return self._summarize_papers(paper_numbers(question))
+        r = self.jobs.answer_results(question)
+        status = r["status"]
+        if status in RESULTS_REPLY:
+            return dict(RESULTS_REPLY[status])
+        if status == "blocked":
+            return self._alert()
+        ans = r.get("answer")
+        if status == "answered":
+            return {"status": "answered", "message": "已投影"}
+        return {"status": status, "message": getattr(ans, "error", "") or "查詢失敗"}
+
+    def _summarize_papers(self, numbers: list | None = None) -> dict:
+        """摘要列出的文獻：一次只做 1 篇，做成 OE 樣式的摘要簡報；立刻回答、背景整理，好了自動播放。
+        篇號以使用者這一輪說的話為準（實機：模型只填了第一篇），模型填的補在後面。"""
+        if self._phi_blocked():
+            return self._alert()
+        base = self.state.results_base
+        if base is None:
+            return dict(RESULTS_REPLY["no_results"])
+        given = [int(n) for n in numbers or [] if str(n).strip().lstrip("-").isdigit()]
+        nums = list(dict.fromkeys(paper_numbers(self.turn_text) + given))
+        if not nums:
+            return {"status": "error", "message": "請說要摘要第幾篇"}
+        first = nums[0]
+        ref = base.references.get(first)
+        if ref is None:
+            return {"status": "not_found", "message": f"清單上沒有第 {first} 篇"}
+        if self.viewer is None:
+            return {"status": "error", "message": "原文功能未啟用"}
+        job = self.jobs.summarize_paper(ref, self.viewer)
+        if not job:
+            return {"status": "busy", "message": "正在查詢或整理中，請稍等"}
+        if len(nums) > 1:
+            said = f"一次只整理一篇：先整理第 {first} 篇，好了會自動播放；第 {nums[1]} 篇等這篇好了再跟我說"
+        else:
+            said = f"開始整理第 {first} 篇，好了會自動播放"
+        return {"status": "started", "message": said}
+
+    def _read_results(self, question: str) -> dict:
+        if self._phi_blocked(question):
+            return self._alert()
+        if self.viewer is None:
+            return {"status": "error", "message": "原文功能未啟用"}
+        if self.state.results_base is None:
+            return dict(RESULTS_REPLY["no_results"])
+        job = self.jobs.read_results(question, self.viewer.abstract_for)
+        if not job:
+            return self._alert()
+        ans = self.jobs.wait_answer(job, 180)
+        if ans is None:
+            return {"status": "error", "message": "讀文獻太久或被新的問題取代", "cards": []}
+        if ans.status == "answered":
+            said = f"找到 {len(ans.cards)} 張字卡，已投影"
+            note = ans.fallback_note
             return {"status": "answered", "message": f"{note}，{said}" if note else said}
         message = {"not_found": ans.summary_zh, "clarify": ans.clarify_zh}.get(ans.status, ans.error)
         return {"status": ans.status, "message": message, "cards": []}
@@ -333,8 +501,8 @@ class VoiceTools:
             if not st.play_summary(st.last_summary):
                 return {"status": "error", "message": "摘要簡報開不起來"}
             return {"status": "ok", "message": "開始播放摘要簡報"}
-        if name.strip() in TODAY_DECK and st.answer_deck is not None:
-            path = Path(st.answer_deck.path)
+        if name.strip() in TODAY_DECK and st.today_deck_path() is not None:
+            path = st.today_deck_path()
         else:
             by_name = {p.stem: p for p in st.deck_paths}
             names = rank_names(name, by_name)
@@ -350,12 +518,14 @@ class VoiceTools:
         target = path.stem
         if st.presenting and st.deck is not None:
             current = st.deck.name
-            if Path(st.deck.path) == path:
+            if current == target:
                 return {"status": "ok", "message": f"已經在播放「{target}」"}
             if not (confirm and st.pending_switch == target):
                 st.pending_switch = target  # 要口頭確認才換片（§6.0）
                 return {"status": "confirm", "message": f"要停止「{current}」、改播「{target}」嗎？"}
-        st.play(path)
+        result = st.request_deck(path, play=True)  # 還沒轉成 PDF 的 pptx：在背景轉，好了自動播放
+        if result != "ready":
+            return st.deck_request_reply(result)
         if not st.presenting or st.deck is None or st.deck.name != target:
             return {"status": "error", "message": f"「{target}」開不起來"}
         return {"status": "ok", "message": f"開始播放「{target}」"}
@@ -441,7 +611,10 @@ class VoiceTools:
     def _read_answer(self, card: int = 0) -> dict:
         """使用者要求才念：字卡（全部或第 N 張，不念出處）；OE 簡報播放中念目前這一頁的原文。"""
         st = self.state
-        if st.temp_kind == "oe" and st.presenting and st.deck is not None:
+        # OE 簡報播放中又問了文獻清單（新回答有字卡、不是這份簡報）：念新回答的字卡
+        newer_cards = (st.answer is not None and bool(st.answer.cards)
+                       and st.answer.oe_deck != str(st.summary_path))
+        if st.temp_kind == "oe" and st.presenting and st.deck is not None and not newer_cards:
             footer = _footer_line_re()
             lines = [l for l in st.deck.page_text(st.page).splitlines() if l.strip() and not footer.match(l)]
             return {"status": "ok", "message": " ".join(lines) or "這一頁沒有文字"}
@@ -453,7 +626,6 @@ class VoiceTools:
             parts = [c.point_zh for c in ans.cards]
             if ans.derivations:
                 parts.append(derived_label() + "；".join(d.text for d in ans.derivations))
-            parts += [note_label() + x for x in ans.derivation_notes]
             return {"status": "ok", "message": "。".join(parts)}
         if not 1 <= n <= len(ans.cards):
             return {"status": "not_found", "message": f"沒有第 {n} 張字卡"}
@@ -461,3 +633,22 @@ class VoiceTools:
 
     def _host_only_command(self, action: str = "") -> dict:
         return dict(REFUSED)
+
+    def _quit_app(self, confirm: bool = False) -> dict:
+        """語音結束程式：先問，使用者在時限內親口說「確定結束」才關（模型自己說「確定」不算）。"""
+        asked_at, reply = self._quit_asked_at, self._quit_reply.replace(" ", "")
+        if not confirm or asked_at is None:
+            self._quit_asked_at, self._quit_reply = self.clock(), ""
+            return dict(QUIT_ASK)
+        if not reply:  # 使用者還沒開口
+            return dict(QUIT_ASK)
+        self._quit_asked_at, self._quit_reply = None, ""
+        if self.clock() - asked_at > QUIT_CONFIRM_TTL:
+            return {"status": "expired", "message": "太久沒有確認，已取消結束程式"}
+        if "確定" not in reply:
+            return {"status": "cancelled", "message": "好的，不結束"}
+        if self.state.quit_handler is None:
+            return {"status": "error", "message": "現在無法用語音結束，請按主持人畫面上方的「結束程式」"}
+        eventlog.log("quit", source="voice")
+        self.state.quit_handler(VOICE_QUIT_DELAY)
+        return {"status": "ok", "message": "好的，程式即將結束"}

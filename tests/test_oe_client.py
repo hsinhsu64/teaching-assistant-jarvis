@@ -333,3 +333,43 @@ def test_ask_openevidence_runs_through_the_adapter(tmp_path):
         assert "OpenEvidence" in str(e), repr(e)
     assert run.cmd[1] == oe_relay.__file__ and run.cmd[2:4] == ["ask", "q"]
     assert run.env["XIAOSHEN_OE_SCRIPT"] == str(tmp_path / "oe.py")
+
+
+# ---- 2026-11-19：OE 把同一篇分成好幾個編號引用 → 改成同一編號（取最小的） ----
+
+def _dup_cit(i, title, doi=""):
+    return {"index": i, "title": title, "first_author": "A", "journal": "J", "year": "2026", "doi": doi}
+
+
+GUIDE = "Clinical Practice Guideline for the Diagnosis and Treatment of UTI in Children"
+
+
+def test_duplicate_citations_renumbered_to_first():
+    from xiaoshen.oe_client import OEResult, merge_duplicate_citations
+    raw = "Text [3]. More [4]. Both [3, 4]. Range [3-5]. Other [10]. Year [2026]."
+    oe = OEResult("a", raw, [_dup_cit(3, GUIDE, "10.1/x"), _dup_cit(4, GUIDE, "10.1/X"), _dup_cit(5, "Trial B", "10.1/b"),
+                             _dup_cit(10, GUIDE, "10.1/x")],
+                  figures=[{"name": "f", "index": 4}], raw=raw,
+                  other_citations=[_dup_cit(None, GUIDE, "10.1/x"), _dup_cit(None, "Other C", "10.1/c")],
+                  deck_figures=[{"name": "f", "index": 10, "marker": ""}])
+    out = merge_duplicate_citations(oe)
+    assert out.raw == "Text [3]. More [3]. Both [3]. Range [3, 5]. Other [3]. Year [2026]."
+    assert out.answer == out.raw
+    assert [c["index"] for c in out.citations] == [3, 5]
+    assert out.figures[0]["index"] == 3 and out.deck_figures[0]["index"] == 3
+    assert [c["title"] for c in out.other_citations] == ["Other C"]
+
+
+def test_duplicate_by_title_when_no_doi():
+    from xiaoshen.oe_client import OEResult, merge_duplicate_citations
+    oe = OEResult("a", "x [2] y [7]", [_dup_cit(2, GUIDE), _dup_cit(7, GUIDE.upper() + ".")], raw="x [2] y [7]")
+    out = merge_duplicate_citations(oe)
+    assert out.raw == "x [2] y [2]" and [c["index"] for c in out.citations] == [2]
+
+
+def test_no_duplicates_unchanged():
+    from xiaoshen.oe_client import OEResult, merge_duplicate_citations
+    oe = OEResult("a", "x [1] y [2]", [_dup_cit(1, "Paper one about kidneys", "10.1/a"),
+                                      _dup_cit(2, "Paper two about kidneys", "10.1/b")], raw="x [1] y [2]")
+    out = merge_duplicate_citations(oe)
+    assert out.raw == "x [1] y [2]" and len(out.citations) == 2

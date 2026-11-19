@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 import uuid
@@ -13,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Literal
 
-from .answering import (Answer, Source, answer_from_model_knowledge, answer_from_openevidence, answer_from_pages,
+from .answering import (Answer, Source, citation_label, answer_from_model_knowledge, answer_from_openevidence, answer_from_pages,
                         answer_from_pubmed, interpret_spoken)
 from . import eventlog
 from . import deck as deckmod
@@ -23,16 +24,33 @@ from .llm import LLM
 from .oe_client import BLOCKED_MSG, ask_openevidence
 from .phi import find_phi
 from .quizgen import MAX_N, MIN_N, generate_questions
+from .results import answer_from_abstracts, answer_from_list, is_results_base
 from .slide_ocr import OCR_MARK
 from .source_text import SourceUnreadable
 from .summary import SummaryError, summarize
-from .summary_deck import render_summary_pdf, summary_filename
+from .summary_deck import summary_filename
+from .summary_oe import render_summary_oe_deck
+from .card import render_card
+from .fulltext import MIN_TITLE_CHARS, NeedsFallback, find_library_pdf, norm_title
 from .oe_deck import oe_deck_filename, render_oe_deck
 from .answering import clarify_question
 from .state import AppState
 from .vocabulary import deck_terms
 
 Route = Literal["openevidence", "pubmed", "references", "deck", "page"]
+OE_PAPER_QUESTION = ("請整理這篇文獻的重點（研究設計、對象、主要結果、結論；若是指引，列出每一條建議與證據等級）："
+                     "{title}，{journal} {year}，doi:{doi}")
+OE_PAPER_NOTE = "由 OpenEvidence 整理，未逐句核對原文"
+SUMMARY_INDEX = "summary_index.json"  # 摘要簡報資料夾裡：哪一篇做過、存在哪個檔
+
+
+def paper_key(ref: dict) -> str:
+    """認同一篇文獻：DOI；沒有 DOI 用完整篇名（太短不認）。"""
+    doi = str(ref.get("doi") or "").strip().lower()
+    if doi:
+        return "doi:" + doi
+    title = norm_title(str(ref.get("title") or ""))
+    return "title:" + title if len(title) >= MIN_TITLE_CHARS else ""
 ROUTES = ("openevidence", "pubmed", "references", "deck", "page")
 DECK_LABEL = "今天的簡報"
 FALLBACK_LABEL = {"deck": DECK_LABEL, "page": "目前這一頁", "references": "參考資料"}
@@ -69,6 +87,7 @@ class JobRunner:
         self.llm = llm
         self.config = config
         self.library = library
+        self._index_lock = threading.Lock()  # 摘要簡報索引（summary_index.json）
         self.ask_fn = ask
         self._threads: list[threading.Thread] = []
         self._fix: dict[str, dict] = {}  # 每個查詢：是否語音、名詞是否已校正過（每題最多一次）
@@ -179,11 +198,7 @@ class JobRunner:
             route = "deck"  # 摘要簡報播放中問「這頁」：改查今天的簡報（§6.2b）
         focus_page = st.page + 1 if route == "page" else None  # 問的當下的頁，不是查詢完成時的頁
         asked_deck = st.answer_deck  # 問的當下的簡報：之後換簡報，「那一頁」仍指這份（審查 #2）
-        with st.lock:
-            st.answer_job = {"id": job_id, "kind": "answer", "label": text, "route": route, "started_at": time.time()}
-            if not st.run_is_open():
-                st.drawer = "working"
-        st._changed()
+        self._start_answer_job(job_id, text, route)
 
         def work() -> None:
             # 語音問題：第一次照原句查，查不到才校正聽錯的醫學名詞再重查（講對時不用多等）
@@ -220,20 +235,98 @@ class JobRunner:
                 ans = Answer(job_id, text, _answer_route(route), "error", error=f"查詢失敗：{e.__class__.__name__}")
             finally:
                 self._fix.pop(job_id, None)
-            with st.lock:
-                if (st.answer_job or {}).get("id") != job_id:
-                    self._publish(job_id, _SUPERSEDED)
-                    return  # 已被較新的問題取代
-                st.set_answer(ans)
-                st.figure_zoom = None
-                st.card = None
-                st.answer_job = None
-                if not st.run_is_open():
-                    st.drawer = "answer"
-                if ans.oe_deck:
-                    self._place_oe_deck(ans)
-            self._publish(job_id, ans)
-            st._changed()
+            self._commit_answer(job_id, ans, results_base=is_results_base(ans))
+
+        self._spawn(work)
+        return job_id
+
+    def _start_answer_job(self, job_id: str, label: str, route: str) -> None:
+        st = self.state
+        with st.lock:
+            st.answer_job = {"id": job_id, "kind": "answer", "label": label, "route": route, "started_at": time.time()}
+            if not st.run_is_open():
+                st.drawer = "working"
+        st._changed()
+
+    def _commit_answer(self, job_id: str, ans: Answer, results_base: bool = False) -> bool:
+        """換上回答（已被較新的問題取代就丟棄）；results_base：同時記成「目前的結果」。"""
+        st = self.state
+        with st.lock:
+            if (st.answer_job or {}).get("id") != job_id:
+                self._publish(job_id, _SUPERSEDED)
+                return False  # 已被較新的問題取代
+            st.set_answer(ans)
+            if results_base:
+                st.results_base = ans
+            st.figure_zoom = None
+            st.answer_job = None
+            if not st.run_is_open():
+                st.drawer = "answer"
+            if ans.oe_deck:
+                self._place_oe_deck(ans)
+        self._publish(job_id, ans)
+        st._changed()
+        if ans.status == "answered" and ans.cards and not ans.oe_deck:
+            self._spawn(lambda: self._save_card(ans))  # 回答一出來就自動存檔（2026-11-19）
+        return True
+
+    def _save_card(self, ans: Answer) -> None:
+        """把回答存成字卡 PNG（紀錄\字卡\）；存不了只記錄，不影響晨會。"""
+        slug = "".join(ch for ch in (ans.interpreted or ans.question) if ch.isalnum() or ch in " -_")[:30].strip()
+        name = f"{datetime.now():%Y-%m-%d_%H%M%S}_{slug or 'card'}.png"
+        try:
+            self._render(render_card, ans, self.config.folder("紀錄") / "字卡" / name)
+        except Exception as e:
+            eventlog.log("card_save", status="error", error=e.__class__.__name__)
+            return
+        ans.card_file = name
+        self.state._changed()
+
+    # ---- 目前的結果：問已列出的文獻（不重新搜尋） ----
+
+    def answer_results(self, question: str) -> dict:
+        """看文獻清單就能答的直接投影；要讀內容才能答回 needs_reading。同步執行（快模型）。"""
+        base = self.state.results_base
+        if base is None:
+            return {"status": "no_results"}
+        if self._phi_blocked(question):
+            return {"status": "blocked"}
+        job_id = uuid.uuid4().hex[:8]
+        drawer_before = self.state.drawer
+        self._start_answer_job(job_id, question, base.route)
+        try:
+            ans = answer_from_list(question, base, self.llm, self.config.model_results)
+        except Exception as e:  # 不讓例外外漏
+            ans = Answer(job_id, question, base.route, "error", error=f"查詢失敗：{e.__class__.__name__}")
+        if ans == "needs_reading":
+            with self.state.lock:
+                if (self.state.answer_job or {}).get("id") == job_id:
+                    self.state.answer_job = None
+                    if self.state.drawer == "working":
+                        self.state.drawer = drawer_before  # 還沒有新回答：抽屜回到原本的樣子
+            self.state._changed()
+            return {"status": "needs_reading"}
+        if not self._commit_answer(job_id, ans):
+            self._wait(job_id, 0)
+            return {"status": "superseded"}
+        self._wait(job_id, 0)  # 同步回傳，不留在結果表
+        return {"status": ans.status, "answer": ans}
+
+    def read_results(self, question: str, fetch: Callable[[dict], tuple[str, str]]) -> str:
+        """讀目前結果前幾篇的摘要後回答（背景工作）；回傳工作 id，沒有結果或命中識別資訊回空字串。"""
+        base = self.state.results_base
+        if base is None or self._phi_blocked(question):
+            return ""
+        job_id = uuid.uuid4().hex[:8]
+        self._start_answer_job(job_id, question, base.route)
+
+        def work() -> None:
+            try:
+                ans = answer_from_abstracts(question, base, fetch, self.llm, self.config.model_answer,
+                                            self.config.max_reference_chars)
+            except Exception as e:
+                ans = Answer(job_id, question, base.route, "error", error=f"讀文獻失敗：{e.__class__.__name__}")
+            self._commit_answer(job_id, ans)
 
         self._spawn(work)
         return job_id
@@ -272,13 +365,13 @@ class JobRunner:
         ans.interpreted = query
         return ans
 
-    def _oe(self, text: str, query: str, ask_back: bool = True) -> Answer:
+    def _oe(self, text: str, query: str, ask_back: bool = True, timeout: float | None = None) -> Answer:
         # 送 OpenEvidence 前先看要不要反問（保留）；已確認過的語音問題不反問
         question = clarify_question(query, self.llm, self.config.model_clarify) if ask_back else ""
         if question:
             return Answer(uuid.uuid4().hex[:8], text, "openevidence", "clarify", clarify_zh=question)
-        oe = answer_from_openevidence(query, self.config.oe_script, self.llm, self.config.model_answer,
-                                      ask=self.ask_fn)
+        ask = self.ask_fn if timeout is None else (lambda q, s: self.ask_fn(q, s, timeout=timeout))
+        oe = answer_from_openevidence(query, self.config.oe_script, self.llm, self.config.model_answer, ask=ask)
         oe.question = text
         if query != text:
             oe.interpreted = query
@@ -449,33 +542,41 @@ class JobRunner:
     def summarize_source(self, viewer) -> str:
         """把投影上的原文整份整理成摘要簡報；完成後存檔並在投影幕播放。回傳工作 id。
         佔用回答的工作槽：新的提問、開始派題或取消 → 這次整理作廢，不搶投影。"""
+        view = self.state.source_view or {}
+        label = f"整理重點：{view.get('citation') or ''}".rstrip("：")
+        return self._summary_job(label, view.get("kind", ""), viewer,
+                                 lambda: (viewer.current_ref(), viewer.read_full))
+
+    def summarize_paper(self, ref: dict, viewer) -> str:
+        """語音「摘要第 N 篇」：不必先打開原文，直接整理目前結果裡的這一篇（2026-11-18）。"""
+        citation = citation_label(ref)
+        return self._summary_job(f"整理重點：{citation}", "paper", viewer,
+                                 lambda: (ref, lambda: viewer.full_doc(ref, citation)))
+
+    def _summary_job(self, label: str, kind: str, viewer, prepare) -> str:
         job_id = uuid.uuid4().hex[:8]
         st, cfg = self.state, self.config
         with st.lock:
             if st.answer_job is not None:
                 return ""  # 同時只能有一份整理；也不能丟掉還在查的問題（審查 #2、#3）
-            view = st.source_view or {}
-            kind = view.get("kind", "")
             st.summary_note = ""
-            st.answer_job = {"id": job_id, "kind": "summary", "label": f"整理重點：{view.get('citation') or ''}".rstrip("："),
-                             "started_at": time.time()}
+            st.answer_job = {"id": job_id, "kind": "summary", "label": label, "started_at": time.time()}
         st._changed()
 
         def work() -> None:
             t0 = time.monotonic()
-            doc = summary = path = summary_deck = None
-            pages = 0
+            info: dict = {}
+            summary_deck = None
             try:
-                doc = viewer.read_full()
-                left = max(30.0, cfg.summary_timeout_seconds - (time.monotonic() - t0))
-                summary = summarize(doc, self.llm, cfg.model_summary, left, cfg.summary_max_chars,
-                                    cfg.summary_chunk_chars)
-                path = cfg.folder("紀錄") / "摘要簡報" / summary_filename(doc.title, datetime.now())
-                renderer = deckmod._RENDERER
-                # 排版會卡住 GIL（30 張約 1 秒）：有轉圖子行程就交給它（審查 #4）
-                pages = renderer.run(render_summary_pdf, summary, path) if renderer else render_summary_pdf(summary, path)
-                summary_deck = deckmod.Deck(path)  # 先開好，不在 state lock 裡等 PDF_LOCK
-                result = {"status": "ok", "pages": pages, "unverified": summary.unverified, "path": str(path)}
+                ref, make_doc = prepare()
+                cached = self._cached_summary(ref) if ref else None
+                if cached is not None:  # 同一篇做過：直接重播，不再整理（2026-11-19）
+                    result, info = cached, dict(cached)
+                else:
+                    result, info = self._summarize_ref(ref, make_doc, viewer.abstract_doc, t0)
+                    if ref:
+                        self._remember_summary(ref, result)
+                summary_deck = deckmod.Deck(Path(result["path"]))  # 先開好，不在 state lock 裡等 PDF_LOCK
             except (SourceUnreadable, SummaryError) as e:
                 result = {"status": "error", "message": str(e)}
             except Exception:  # 不讓執行緒例外外漏
@@ -485,21 +586,104 @@ class JobRunner:
                     result = None  # 已被新的提問、派題或取消取代：存好的檔案留著，不搶投影
                 else:
                     # 先換上摘要簡報再清工作槽：畫面不會出現「已完成、但還是舊簡報」的空檔
-                    if result["status"] == "ok" and not st.play_summary(path, summary_deck):
+                    if result["status"] == "ok" and not st.play_summary(Path(result["path"]), summary_deck):
                         result = {"status": "error", "message": "無法播放摘要簡報"}
                     st.answer_job = None
                     if result["status"] != "ok":
                         st.summary_note = f"整理重點失敗：{result['message']}"
             eventlog.log("summary", kind=kind, status=result["status"] if result else "superseded",
-                         full_text=doc.full_text if doc else None, source_pages=len(doc.pages) if doc else 0,
-                         slides=len(summary.slides) if summary else 0, deck_pages=pages,
-                         unverified=summary.unverified if summary else 0,
-                         seconds=round(time.monotonic() - t0, 1))
+                         origin=info.get("origin"), source_pages=info.get("source_pages", 0),
+                         slides=info.get("slides", 0), deck_pages=info.get("pages", 0),
+                         unverified=info.get("unverified", 0), seconds=round(time.monotonic() - t0, 1))
             self._publish(job_id, _SUPERSEDED if result is None else result)
             st._changed()
 
         self._spawn(work)
         return job_id
+
+    def _render(self, fn, *args):
+        renderer = deckmod._RENDERER
+        # 排版會卡住 GIL（30 張約 1 秒）：有轉圖子行程就交給它（審查 #4）
+        return renderer.run(fn, *args) if renderer else fn(*args)
+
+    def _summary_path(self, title: str) -> Path:
+        return self.config.folder("紀錄") / "摘要簡報" / summary_filename(title, datetime.now())
+
+    # ---- 摘要簡報重用：同一篇（DOI 或完整篇名）做過就直接播 ----
+
+    def _summary_index_path(self) -> Path:
+        return self.config.folder("紀錄") / "摘要簡報" / SUMMARY_INDEX
+
+    def _load_summary_index(self) -> dict:
+        try:
+            return json.loads(self._summary_index_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+
+    def _cached_summary(self, ref: dict) -> dict | None:
+        """只讀到摘要的不重用；參考資料後來放了這篇的 PDF、而舊的不是讀 PDF 做的，也重做。"""
+        key = paper_key(ref)
+        entry = self._load_summary_index().get(key) if key else None
+        if not entry or entry.get("origin") in ("abstract", "") or not Path(entry.get("path", "")).exists():
+            return None
+        if entry["origin"] != "pdf" and find_library_pdf(ref, self.library) is not None:
+            return None
+        return {"status": "ok", "pages": entry.get("pages", 0), "unverified": entry.get("unverified", 0),
+                "path": entry["path"], "origin": entry["origin"], "cached": True}
+
+    def _remember_summary(self, ref: dict, result: dict) -> None:
+        key = paper_key(ref)
+        if not key or result.get("status") != "ok":
+            return
+        with self._index_lock:
+            index = self._load_summary_index()
+            index[key] = {k: result.get(k) for k in ("path", "pages", "unverified", "origin")}
+            try:
+                self._summary_index_path().parent.mkdir(parents=True, exist_ok=True)
+                self._summary_index_path().write_text(json.dumps(index, ensure_ascii=False, indent=1),
+                                                      encoding="utf-8")
+            except OSError:
+                pass  # 記不住只是下次要重做
+
+    def _summarize_ref(self, ref: dict | None, make_doc, abstract_doc, t0: float) -> tuple[dict, dict]:
+        """全文 → 整理成 OE 樣式簡報；沒有全文 → 請 OE 整理這一篇；OE 也不行 → 讀摘要整理。"""
+        cfg = self.config
+        try:
+            doc = make_doc()
+        except NeedsFallback as e:
+            ref = e.ref or ref
+            left = cfg.summary_timeout_seconds - (time.monotonic() - t0)
+            # OE 最多等 60 秒（子行程另加 30 秒），留時間給讀摘要與整理：語音只等 180 秒
+            oe = self._oe_paper_deck(ref, max(20.0, min(60.0, left - 100)))
+            if oe is not None:
+                return oe, dict(oe, source_pages=0, slides=0)
+            doc = abstract_doc(ref, citation_label(ref) if ref.get("index") is not None else "")
+        left = max(30.0, cfg.summary_timeout_seconds - (time.monotonic() - t0))
+        summary = summarize(doc, self.llm, cfg.model_summary, left, cfg.summary_max_chars, cfg.summary_chunk_chars,
+                            cfg.summary_thinking)
+        path = self._summary_path(doc.title)
+        pages = self._render(render_summary_oe_deck, summary, ref, path)
+        origin = doc.origin or ("abstract" if not doc.full_text else "")
+        result = {"status": "ok", "pages": pages, "unverified": summary.unverified, "path": str(path),
+                  "origin": origin}
+        return result, dict(result, source_pages=len(doc.pages), slides=len(summary.slides))
+
+    def _oe_paper_deck(self, ref: dict, timeout: float = 60) -> dict | None:
+        """請 OpenEvidence 整理這一篇，照 OE 簡報呈現；OE 被擋、逾時、查不到或講的不是這一篇回 None。"""
+        title = str(ref.get("title") or "")
+        if not title.strip() and not ref.get("doi"):
+            return None  # 說不出是哪一篇，OE 會自己找別篇
+        question = OE_PAPER_QUESTION.format(title=title, journal=ref.get("journal") or "", year=ref.get("year") or "",
+                                            doi=ref.get("doi") or "")
+        try:
+            ans = self._oe(question, question, ask_back=False, timeout=timeout)
+        except Exception:
+            return None
+        if ans.status != "answered" or ans.oe is None or not _cites_paper(ans.oe, ref):
+            return None
+        path = self._summary_path(title or "OpenEvidence")
+        info = self._render(render_oe_deck, f"整理：{title}", ans.oe, OE_PAPER_NOTE, path)
+        return {"status": "ok", "pages": info.pages, "unverified": 0, "path": str(path), "origin": "oe"}
 
     def cancel_summary(self, job_id: str | None = None) -> bool:
         """取消整理中的摘要；給 job_id 就只取消那一份（審查 #2：不能取消到別人的）。"""
@@ -582,6 +766,19 @@ class JobRunner:
 
         self._spawn(work)
         return job_id
+
+
+def _cites_paper(oe, ref: dict) -> bool:
+    """OE 的回答有引用到這一篇（DOI 相同，或篇名相同）才算是在整理這一篇。"""
+    doi = str(ref.get("doi") or "").strip().lower()
+    title = norm_title(str(ref.get("title") or ""))
+    for c in list(oe.citations) + list(oe.other_citations):
+        if doi and str(c.get("doi") or "").strip().lower() == doi:
+            return True
+        cited = norm_title(str(c.get("title") or ""))
+        if len(title) >= MIN_TITLE_CHARS and cited and (cited == title or title in cited):
+            return True
+    return False
 
 
 def _answer_route(route: str) -> str:

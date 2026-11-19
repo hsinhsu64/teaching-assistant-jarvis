@@ -56,7 +56,7 @@ function makeKeyHandler(getKeys, actions) {
   };
 }
 
-const DEFAULT_KEYS = { next: ["PageDown", "ArrowRight", " "], prev: ["PageUp", "ArrowLeft"], drawer: ["b", "B", "."], wake: [] };
+const DEFAULT_KEYS = { next: ["PageDown", "ArrowRight", "ArrowDown", " "], prev: ["PageUp", "ArrowLeft", "ArrowUp"], drawer: ["b", "B", "."], wake: [] };
 
 function postJSON(url, body) {
   return fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body ?? {}) });

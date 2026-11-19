@@ -243,3 +243,54 @@ def test_mac_convert_missing_or_empty_pdf_raises(monkeypatch, tmp_path, content)
 
     with pytest.raises(RuntimeError, match="沒有產生 PDF"):
         converter.powerpoint_convert(tmp_path / "a.pptx", dst, run=run)
+
+
+def test_convert_file_converts_only_that_one(tmp_path):
+    from xiaoshen.converter import convert_file
+
+    t = time.time() - 100
+    a = touch(tmp_path / "A.pptx", t)
+    b = touch(tmp_path / "B.pptx", t)
+    assert convert_file(a, fake_convert) == tmp_path / "A.pdf"
+    assert (tmp_path / "A.pdf").read_bytes().startswith(b"%PDF") and not (tmp_path / "B.pdf").exists()
+    assert abs((tmp_path / "A.pdf").stat().st_mtime - t) < 2  # 「最新簡報」仍依 pptx 的時間排序
+    assert needs_conversion(b)
+
+
+def test_convert_file_skips_an_up_to_date_pdf(tmp_path):
+    from xiaoshen.converter import convert_file
+
+    t = time.time()
+    src = touch(tmp_path / "A.pptx", t)
+    touch(tmp_path / "A.pdf", t + 10)
+    calls = []
+    assert convert_file(src, lambda s, d: calls.append(s)) == tmp_path / "A.pdf" and calls == []
+
+
+def test_convert_file_failure_raises_and_leaves_no_partial_pdf(tmp_path):
+    from xiaoshen.converter import convert_file
+
+    src = touch(tmp_path / "A.pptx", time.time())
+
+    def broken(s, d):
+        d.write_bytes(b"half")
+        raise RuntimeError("PowerPoint busy")
+
+    with pytest.raises(RuntimeError, match="busy"):
+        convert_file(src, broken)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["A.pptx"]
+
+
+def test_list_deck_entries_lists_pdfs_and_unconverted_pptx_newest_first(tmp_path):
+    from xiaoshen.converter import list_deck_entries
+
+    t = time.time() - 1000
+    touch(tmp_path / "Old.pdf", t)
+    touch(tmp_path / "Done.pptx", t + 10)
+    touch(tmp_path / "Done.pdf", t + 10)          # 已轉好：列 PDF
+    new = touch(tmp_path / "New.pptx", t + 30)    # 還沒轉：列 pptx
+    stale = touch(tmp_path / "Stale.pptx", t + 20)
+    touch(tmp_path / "Stale.pdf", t + 5)          # pptx 改過：列 pptx，不列舊 PDF
+    touch(tmp_path / "~xiaoshen-New.pdf", t + 40)  # 轉檔暫存檔不列
+    assert list_deck_entries(tmp_path) == [new, stale, tmp_path / "Done.pdf", tmp_path / "Old.pdf"]
+    assert list_deck_entries(tmp_path / "missing") == []

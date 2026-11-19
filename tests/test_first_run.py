@@ -190,3 +190,35 @@ def test_all_six_keys_written_in_one_upsert(tmp_path, monkeypatch):
     assert len(calls) == 1
     assert set(calls[0]) == {"data_root", "display_name", "wake_word", "specialty", "meeting_type",
                              "meeting_type_other"}
+
+
+# ---- 2026-11-19：主持人畫面「更換資料夾…」用的選資料夾視窗（另開一個小程式，Mac 也能跳視窗） ----
+
+def test_pick_folder_dialog_returns_chosen_path():
+    from types import SimpleNamespace
+
+    from xiaoshen.first_run import pick_folder_dialog
+
+    seen = {}
+
+    def runner(cmd, **kw):
+        seen["cmd"], seen["kw"] = cmd, kw
+        return SimpleNamespace(returncode=0, stdout="D:/教學資料\n")
+
+    assert pick_folder_dialog(Path("C:/start"), runner=runner) == "D:/教學資料"
+    assert "askdirectory" in " ".join(seen["cmd"]) and seen["kw"]["timeout"] >= 60
+
+
+def test_pick_folder_dialog_cancel_or_failure_is_empty():
+    import subprocess
+    from types import SimpleNamespace
+
+    from xiaoshen.first_run import pick_folder_dialog
+
+    assert pick_folder_dialog(Path("."), runner=lambda c, **k: SimpleNamespace(returncode=0, stdout="\n")) == ""
+    assert pick_folder_dialog(Path("."), runner=lambda c, **k: SimpleNamespace(returncode=1, stdout="x")) == ""
+
+    def timeout(c, **k):
+        raise subprocess.TimeoutExpired(c, 1)
+
+    assert pick_folder_dialog(Path("."), runner=timeout) == ""

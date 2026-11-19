@@ -66,20 +66,49 @@ def _convert_pending(folder: Path, convert: Converter, already_reported: set | N
         except OSError:
             continue  # 檔案剛好被移走或同步中
         report.attempted.append(src.name)
-        pdf = src.with_suffix(".pdf")
-        tmp = src.with_name(f"~xiaoshen-{src.stem}.pdf")
         try:
-            convert(src, tmp)
-            os.replace(tmp, pdf)
-            os.utime(pdf, (mtime, mtime))
+            _convert_one(src, convert, mtime)
             report.converted.append(src.name)
         except Exception as e:
-            tmp.unlink(missing_ok=True)
             key = (src.name, mtime)
             if key not in reported:
                 reported.add(key)
                 report.failed.append((src.name, str(e) or e.__class__.__name__))
     return report
+
+
+def _convert_one(src: Path, convert: Converter, mtime: float) -> Path:
+    """轉成同名 PDF：先寫暫存檔再換名，失敗時不留半份 PDF（例外照樣丟出）。"""
+    pdf = src.with_suffix(".pdf")
+    tmp = src.with_name(f"~xiaoshen-{src.stem}.pdf")
+    try:
+        convert(src, tmp)
+        os.replace(tmp, pdf)
+        os.utime(pdf, (mtime, mtime))
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    return pdf
+
+
+def convert_file(src: Path, convert: Converter) -> Path:
+    """只轉這一份（主持人要播還沒轉的 pptx 時）；PDF 已是最新就直接回傳。失敗丟出例外。"""
+    with _CONVERT_LOCK:  # 背景轉檔正在轉同一份時，等它轉完就不必再轉
+        if needs_conversion(src):
+            return _convert_one(src, convert, src.stat().st_mtime)
+        return src.with_suffix(".pdf")
+
+
+def list_deck_entries(folder: Path) -> list[Path]:
+    """簡報清單：PDF，加上還沒轉（或改過）的 pptx／ppt，新的在前。
+
+    pptx 改過時列 pptx、不列舊的同名 PDF；選到 pptx 時才轉檔（開機不轉）。"""
+    if not folder.is_dir():
+        return []
+    pending = [p for p in find_sources(folder) if needs_conversion(p)]
+    stale = {p.stem for p in pending}
+    pdfs = [p for p in folder.glob("*.pdf") if not p.name.startswith("~") and p.stem not in stale]
+    return sorted(pdfs + pending, key=lambda p: p.stat().st_mtime, reverse=True)
 
 
 def powerpoint_available() -> bool:

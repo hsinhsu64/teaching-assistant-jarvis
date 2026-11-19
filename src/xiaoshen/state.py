@@ -15,8 +15,8 @@ from typing import Callable, Literal
 
 from .answering import Answer
 from .config import Config
-from .converter import ConversionReport, Converter, convert_pending, find_sources
-from .deck import Deck, DeckError
+from .converter import ConversionReport, Converter, convert_pending, find_sources, list_deck_entries, needs_conversion
+from .deck import Deck, DeckError, list_decks
 from .host_phone import HostPairing
 from .persona import app_info
 from .phone_mic import PhoneMic
@@ -27,6 +27,9 @@ from .records import save_record
 VOICE_CONFIRM_TTL = 180  # 語音查詢等確認的秒數，過了作廢（spec §5.4，2026-11-06）
 
 Audience = Literal["display", "host"]
+
+
+DECK_CONVERTING_MESSAGE = "這份簡報要先轉成 PDF，需要一段時間，好了會自動播放"
 
 
 class AppState:
@@ -47,12 +50,14 @@ class AppState:
         self.token = secrets.token_urlsafe(16)
         self.public_base: str | None = None
         self.phone_reachable = True  # 晨會中定期檢查；通道斷了就不再顯示 QR Code
+        self.phone_pending = False  # 新網址還在確認手機連不連得上：先不顯示 QR Code
         self.warnings: list[str] = []
         self.checks: list[dict] = []
         self.conversion_check: dict | None = None  # 簡報 pptx 轉檔狀態，併入自我檢查
         self._auto_dispatched: set[tuple[str, int]] = set()
         # Phase 2：AI 回答與出題草稿（草稿只給主持人畫面）
         self.answer: Answer | None = None
+        self.results_base: Answer | None = None  # 目前的結果：最近一次查到文獻的回答（問「哪一篇最新」用）
         self.answer_job: dict | None = None
         self.quiz_job: dict | None = None
         self.drafts: list[Question] = []
@@ -66,7 +71,6 @@ class AppState:
         self._web_close_thread: threading.Thread | None = None
         self.page_ocr: dict[int, str] = {}     # 投影片圖片辨識（0-based 頁 → 抄錄文字）
         self.ocr_progress: dict | None = None  # {done, total[, failed]}
-        self.card: dict | None = None         # 投影中的字卡 {answer_id, path}（存檔在 紀錄\字卡\）
         self.phi_hits: list[str] = []
         # Phase 3：語音
         self.voice_phi_alert = False          # 語音逐字稿疑似含識別資訊（黃燈）
@@ -78,7 +82,7 @@ class AppState:
         self.voice_transcript: list[str] = [] # 「你：…」「（助理名）：…」最近 20 行（只給主持人）
         self.wake_handler: Callable[[], None] | None = None   # 由 launcher 接上 VoiceSession.wake
         self.stop_handler: Callable[[], None] | None = None
-        self.quit_handler: Callable[[], None] | None = None   # 主持人「結束程式」；由 launcher 接上
+        self.quit_handler: Callable[..., None] | None = None  # 主持人「結束程式」／語音結束；由 launcher 接上
         self._last_phone_wake = float("-inf")
         # 主畫面（§6.0）：開機在主畫面，說「播放 xxx 簡報」才播放
         self.presenting = False
@@ -89,15 +93,19 @@ class AppState:
         self.oe_pending: Path | None = None      # 做好但還沒播的 OE 簡報（正在播簡報要先問、派題中先等）
         self._summary_restore: tuple | None = None  # (簡報, 頁, 是否播放中)
         self.summary_note = ""  # 最近一次整理失敗的原因（只給主持人看）
-        # 手機（§6.3a，2026-11-05 修訂）：投影控制預設開、搜尋網路預設關；「詢問老師」一直開著
+        # 手機（§6.3a，2026-11-18 修訂）：投影控制與搜尋文獻都預設關，主持人在「手機操作」區打開；「詢問老師」一直開著
         self.oe_recheck: Callable | None = None  # 主持人按「重新檢查」OpenEvidence（由 launcher 接上）
         self.host_pairing = HostPairing()  # 主持人手機（§6.3b）
         self.phone_mic = PhoneMic()        # 主持人手機的麥克風（§6.3b，2026-11-08）
-        self.phone_control_enabled = True
+        self.phone_control_enabled = False
         self.phone_search_enabled = False
         self.teacher_questions: list[dict] = []  # {id, text, phi_hits}：只在記憶體、只給主持人看
         self.teacher_shown: list[str] = []       # 投影抽屜上顯示中的提問（可以同時好幾題，依按的順序）
-        self.deck_paths: list[Path] = []       # 簡報\ 內的 PDF（launcher 定期更新）
+        self.deck_paths: list[Path] = []       # 簡報\ 內的 PDF 與還沒轉的 pptx（launcher 定期更新）
+        # 把一份 pptx 轉成 PDF 並回傳 PDF 路徑（launcher 設定；None＝這台電腦不能轉）
+        self.deck_converter: Callable[[Path], Path] | None = None
+        self.deck_converting: dict | None = None  # {"name", "play"}：要播的 pptx 正在轉成 PDF
+        self._convert_thread: threading.Thread | None = None
         self.deck_candidates: list[str] = []  # 語音說的簡報名稱有多份符合
         self.pending_switch: str | None = None  # 播放中要改播的簡報，等口頭確認
         self._last_page: dict[str, int] = {}  # 每份簡報上次播放停的頁（只在記憶體）
@@ -220,6 +228,90 @@ class AppState:
         self.deck_candidates = [n for n in self.deck_candidates if n in names]
         self._changed()
 
+    def list_deck_files(self) -> list[Path]:
+        """簡報清單：自動轉檔開著時含還沒轉的 pptx（選到時才轉），關掉時只列 PDF。"""
+        folder = self.config.folder("簡報")
+        return list_deck_entries(folder) if self.config.auto_convert_pptx else list_decks(folder)
+
+    def refresh_deck_list(self) -> None:
+        """重新列出簡報；還沒開任何簡報時打開最新的那份（「今天的簡報」，不投影）。
+        最新的還是 pptx 就先不開，等它轉好（不改開比較舊的 PDF）。"""
+        paths = self.list_deck_files()
+        self.set_deck_paths(paths)
+        if (self.deck is None and self.deck_converting is None and paths
+                and paths[0].suffix.lower() == ".pdf"):
+            self.open_deck(paths[0])
+
+    def today_deck_path(self) -> Path | None:
+        """「今天的簡報」：開著的那份；還沒開（例如最新的是還沒轉的 pptx）就是清單裡最新的。"""
+        if self.answer_deck is not None:
+            return Path(self.answer_deck.path)
+        return self.deck_paths[0] if self.deck_paths else None
+
+    def request_deck(self, path: Path, play: bool) -> Literal["ready", "converting", "busy", "error"]:
+        """主持人要打開（play=False）或播放這份簡報。
+
+        PDF（或已轉好的 pptx）馬上打開／播放，回傳 "ready"；還沒轉的 pptx 在背景轉成 PDF，
+        回傳 "converting"，轉完自動打開／播放。同時只轉一份：轉別份時回傳 "busy"。"""
+        path = Path(path)
+        if path.suffix.lower() != ".pdf" and not needs_conversion(path):
+            path = path.with_suffix(".pdf")
+        if path.suffix.lower() == ".pdf":
+            self.play(path) if play else self.open_deck(path)
+            return "ready"
+        with self.lock:
+            busy = self.deck_converting
+            if busy is not None:
+                if busy["name"] != path.stem:
+                    return "busy"
+                busy["play"] = busy["play"] or play  # 轉檔中又按「播放」：轉完直接播放
+                self._changed()
+                return "converting"
+            if self.deck_converter is None:
+                self.warnings.append(f"這台電腦沒有 PowerPoint，無法轉換：{path.name}（請先手動匯出 PDF）")
+                self._changed()
+                return "error"
+            self.deck_converting = {"name": path.stem, "play": play}
+            self._convert_thread = threading.Thread(target=self._convert_then_open, args=(path,), daemon=True)
+            self._convert_thread.start()
+        self._changed()
+        return "converting"
+
+    def play_after_conversion(self) -> str | None:
+        """主持人在轉檔中按「播放簡報」：轉好直接播放。回傳正在轉的簡報名稱；沒有在轉就回傳 None。"""
+        with self.lock:
+            if self.deck_converting is None:
+                return None
+            self.deck_converting["play"] = True
+            name = self.deck_converting["name"]
+        self._changed()
+        return name
+
+    def deck_request_reply(self, result: str) -> dict:
+        """request_deck 不是 "ready" 時要告訴主持人的話（語音照念、手機與主持人畫面顯示）。"""
+        if result == "converting":
+            return {"status": "converting", "message": DECK_CONVERTING_MESSAGE}
+        if result == "busy":
+            name = (self.deck_converting or {}).get("name", "另一份簡報")
+            return {"status": "busy", "message": f"正在把「{name}」轉成 PDF，轉好後再播放別份"}
+        return {"status": "error", "message": "這台電腦沒有 PowerPoint，無法轉換這份簡報，請先從 PowerPoint 匯出 PDF"}
+
+    def _convert_then_open(self, src: Path) -> None:
+        pdf = None
+        try:
+            pdf = self.deck_converter(src)
+        except Exception as e:
+            self.warnings.append(f"簡報轉檔失敗：{src.name}（{e or e.__class__.__name__}）")
+        with self.lock:
+            want, self.deck_converting = self.deck_converting, None
+        self.set_deck_paths(self.list_deck_files())
+        if pdf is not None and want is not None:
+            if want["play"]:
+                self.play(pdf)
+            elif not self.presenting:
+                self.open_deck(pdf)
+        self._changed()
+
     def play(self, path: Path) -> None:
         """投影幕開始播放這份簡報：同一份接續上次播放的頁，另一份從第 1 頁開始。不自動派題。"""
         with self.lock:
@@ -293,7 +385,6 @@ class AppState:
             return
         with self.lock:
             self.page = max(0, min(page, self.deck.page_count - 1))
-            self.card = None
             self.figure_zoom = None
             self._auto_dispatch()
         self._changed()
@@ -335,7 +426,6 @@ class AppState:
             self.drawer = "quiz"
             if (self.answer_job or {}).get("kind") == "summary":
                 self.answer_job = None  # 開始派題：放棄整理中的摘要簡報（§6.2b）
-            self.card = None
             self.figure_zoom = None
             if self.source_view is not None:
                 self.close_source_view()  # 原文畫面在最上層，會蓋住題目與 QR（審查 #9）
@@ -372,7 +462,6 @@ class AppState:
         self.drawer = "hidden"
         self.teacher_shown = []  # 收起後再投影別題，前面的不會又冒出來
         self.figure_zoom = None
-        self.card = None
         self._changed()
 
     def close_source_view(self) -> None:
@@ -567,7 +656,7 @@ class AppState:
     # ---- 快照 ----
 
     def phone_url(self) -> str | None:
-        if not self.public_base or not self.phone_reachable:
+        if not self.public_base or not self.phone_reachable or self.phone_pending:
             return None
         return f"{self.public_base}/q?t={self.token}"
 
@@ -584,6 +673,8 @@ class AppState:
                                          if (q := self._teacher(i)) is not None] if self.drawer == "teacher" else []),
             "run": run,
             "phone_url": self.phone_url(),
+            "phone_pending": self.phone_pending,
+            "deck_converting": dict(self.deck_converting) if self.deck_converting else None,
             "app": app_info(),
             "keys": {"next": self.config.keys_next, "prev": self.config.keys_prev,
                      "drawer": self.config.keys_drawer, "wake": self.config.keys_wake},
@@ -598,8 +689,6 @@ class AppState:
         snap["show_quotes"] = self.show_quotes
         snap["figure_zoom"] = self.figure_zoom
         snap["source_view"] = self.source_view
-        snap["card"] = ({"answer_id": self.card["answer_id"], "url": f"/ai/card/{self.card['answer_id']}.png"}
-                        if self.card else None)
         snap["voice_status"] = self.voice_status
         snap["voice_phi_alert"] = self.voice_phi_alert
         pending = self.active_voice_confirm()

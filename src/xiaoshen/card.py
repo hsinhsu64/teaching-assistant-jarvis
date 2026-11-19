@@ -13,7 +13,7 @@ import pymupdf
 
 from .deck import PDF_LOCK
 from . import persona
-from .answering import Answer, derived_label, display_quote, note_label
+from .answering import Answer, derived_label, display_quote
 
 WIDTH, HEIGHT = 1280, 720
 ACCENT = "#e8743b"
@@ -56,8 +56,7 @@ def card_html(a: Answer) -> str:
     derived = "".join(
         f'<li style="margin-bottom:10px"><b>{derived_label()}</b>{e(d.text)} <span style="color:{ACCENT}">'
         + "".join(f"[{n}]" for n in sorted({n for u in d.uses for n in markers[u]})) + "</span></li>"
-        for d in a.derivations) + "".join(
-        f'<li style="margin-bottom:10px; color:#8a5a00">{note_label()}{e(n)}</li>' for n in a.derivation_notes)
+        for d in a.derivations)  # 「為什麼沒推導」的說明只給主持人畫面
     points = "".join(
         f'<li style="margin-bottom:10px">{e(display_quote(c.quote))} '
         f'<span style="color:{ACCENT}">{"".join(f"[{n}]" for n in m)}</span></li>'

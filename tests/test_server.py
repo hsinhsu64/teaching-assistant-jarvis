@@ -189,20 +189,72 @@ def test_ai_routes_503_without_jobs(control_client):
     assert control_client.post("/api/ask", json={"text": "q", "route": "deck", "refs": []}).status_code == 503
 
 
-def test_upload_reference(ai_client, state, tmp_path, make_pdf):
-    src = make_pdf(["KDIGO text " * 5], folder=tmp_path / "up", name="KDIGO 2021.pdf")
-    r = ai_client.post("/api/references/upload", files={"file": ("KDIGO 2021.pdf", src.read_bytes(), "application/pdf")})
-    assert r.status_code == 200 and r.json()["name"] == "KDIGO 2021"
-    assert (state.config.folder("參考資料") / "KDIGO 2021.pdf").exists()
-    refs = ai_client.get("/api/references").json()
-    assert refs == [{"name": "KDIGO 2021", "pages": 1, "scanned": False}]
+def test_reference_upload_removed(ai_client, state):
+    # 2026-11-19：主持人畫面拿掉「把 PDF／pptx 拖到這裡」；參考資料直接放進資料夾
+    from xiaoshen.config import REPO_ROOT
+
+    r = ai_client.post("/api/references/upload", files={"file": ("a.pdf", b"%PDF", "application/pdf")})
+    assert r.status_code in (404, 405)
+    host = (REPO_ROOT / "web" / "host.html").read_text(encoding="utf-8")
+    assert 'id="drop"' not in host and "拖到這裡" not in host
+    assert "references/upload" not in (REPO_ROOT / "web" / "host.js").read_text(encoding="utf-8")
 
 
-def test_upload_reference_rejects_other_types_and_paths(ai_client, state):
-    r = ai_client.post("/api/references/upload", files={"file": ("evil.exe", b"MZ", "application/octet-stream")})
-    assert r.status_code == 400
-    r = ai_client.post("/api/references/upload", files={"file": ("../../x.pdf", b"%PDF", "application/pdf")})
-    assert not (state.config.data_root / "x.pdf").exists()
+# ---- 2026-11-19：設定裡顯示資料夾、可以更換（選已有的或在視窗裡新增） ----
+
+def _folder_client(state, tmp_path, picked):
+    from fastapi.testclient import TestClient
+    from xiaoshen.server import Hub, create_control_app
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(f"data_root = '{state.config.data_root}'\n", encoding="utf-8")
+    seen = []
+
+    def pick(start):
+        seen.append(start)
+        return picked
+
+    return TestClient(create_control_app(state, Hub(), config_path=cfg, pick_folder=pick)), cfg, seen
+
+
+def test_settings_shows_data_root(state, tmp_path):
+    c, _, _ = _folder_client(state, tmp_path, "")
+    assert c.get("/api/settings").json()["data_root"] == str(state.config.data_root)
+
+
+def test_change_folder_creates_subfolders_and_saves(state, tmp_path):
+    from xiaoshen.config import FOLDERS, load_config
+
+    new = tmp_path / "新的教學資料夾"
+    c, cfg, seen = _folder_client(state, tmp_path, str(new))
+    r = c.post("/api/settings/folder").json()
+    assert r == {"ok": True, "folder": str(new), "restart_needed": True}
+    assert all((new / name).is_dir() for name in FOLDERS)
+    assert load_config(cfg).data_root == new and seen == [state.config.data_root]
+    assert c.get("/api/settings").json()["data_root"] == str(new)  # 表單看得到剛存的
+
+
+def test_change_folder_cancelled(state, tmp_path):
+    c, cfg, _ = _folder_client(state, tmp_path, "")
+    before = cfg.read_text(encoding="utf-8")
+    assert c.post("/api/settings/folder").json() == {"ok": False, "cancelled": True}
+    assert cfg.read_text(encoding="utf-8") == before
+
+
+def test_change_folder_rejects_install_folder(state, tmp_path):
+    from xiaoshen.config import REPO_ROOT
+
+    c, cfg, _ = _folder_client(state, tmp_path, str(REPO_ROOT / "資料"))
+    r = c.post("/api/settings/folder")
+    assert r.status_code == 422 and "安裝資料夾" in r.json()["detail"]
+    assert not (REPO_ROOT / "資料").exists()
+
+
+def test_host_settings_has_folder_row():
+    from xiaoshen.config import REPO_ROOT
+
+    host = (REPO_ROOT / "web" / "host.html").read_text(encoding="utf-8")
+    assert 'id="setFolder"' in host and "更換資料夾…" in host
 
 
 # ---- Phase 3 ----
@@ -282,29 +334,18 @@ def test_figure_route_and_zoom(control_client, phone_client, state, tmp_path):
     assert control_client.post("/api/answer/figure", json={"index": 5}).status_code == 404
 
 
-def test_answer_card_render_project_save_hide(control_client, phone_client, state):
-    from xiaoshen.answering import Answer, Card
+def test_card_feature_removed(control_client, state):
+    # 2026-11-19：拿掉「整理成字卡」「收回字卡」；回答一出來就自動存 PNG（見 test_jobs）
+    from xiaoshen.config import REPO_ROOT
 
-    assert control_client.post("/api/answer/card").status_code == 409  # 沒有回答
-    state.answer = Answer("ab12", "SRNS 一線？", "deck", "not_found", summary_zh="資料中沒有提到")
-    assert control_client.post("/api/answer/card").status_code == 409  # 沒有驗證過的字卡
-    state.answer = Answer("ab12", "SRNS 一線？", "deck", "answered",
-                          cards=[Card("p", "We recommend calcineurin inhibitors", "今天的簡報 第 2 頁")])
-    r = control_client.post("/api/answer/card")
-    assert r.status_code == 200
-    saved = state.config.folder("紀錄") / "字卡" / r.json()["file"]
-    assert saved.exists() and saved.read_bytes()[:4] == b"\x89PNG" and "SRNS" in saved.name
-    disp = state.snapshot("display")
-    assert disp["card"] == {"answer_id": "ab12", "url": "/ai/card/ab12.png"}
-    img = control_client.get("/ai/card/ab12.png")
-    assert img.status_code == 200 and img.content == saved.read_bytes()
-    assert control_client.get("/ai/card/zz.png").status_code == 404
-    assert phone_client.get("/ai/card/ab12.png").status_code == 404
-    control_client.post("/api/answer/card/hide")
-    assert state.snapshot("display")["card"] is None
-    control_client.post("/api/answer/card")
-    control_client.post("/api/drawer/hide")
-    assert state.card is None  # 收起抽屜一併收回字卡
+    assert control_client.post("/api/answer/card").status_code in (404, 405)
+    assert control_client.post("/api/answer/card/hide").status_code in (404, 405)
+    assert control_client.get("/ai/card/ab12.png").status_code == 404
+    assert "card" not in state.snapshot("display") and not hasattr(state, "card")
+    host = (REPO_ROOT / "web" / "host.html").read_text(encoding="utf-8")
+    assert "makeCard" not in host and "hideCard" not in host and 'id="cardMsg"' in host
+    assert "cardview" not in (REPO_ROOT / "web" / "display.html").read_text(encoding="utf-8")
+    assert "answer/card" not in (REPO_ROOT / "web" / "display.js").read_text(encoding="utf-8")
 
 
 # ---- 主畫面（§6.0）----
@@ -559,9 +600,13 @@ def tmp_config(tmp_path):
     return p
 
 
+FAKE_DEVICES = {"input": ["麥克風 (USBMIC1.)", "麥克風排列 (Realtek(R) Audio)"], "output": ["喇叭 (USBMIC1.)"]}
+
+
 @pytest.fixture
 def client(state, tmp_config):
-    with TestClient(create_control_app(state, Hub(), config_path=tmp_config)) as c:
+    with TestClient(create_control_app(state, Hub(), config_path=tmp_config,
+                                       device_names=lambda: FAKE_DEVICES)) as c:
         yield c
 
 
@@ -569,7 +614,64 @@ def test_get_settings_defaults_and_meeting_types(client):
     from xiaoshen.persona import MEETING_TYPES
 
     body = client.get("/api/settings").json()
-    assert body == {**SETTINGS, "meeting_types": list(MEETING_TYPES)}
+    assert body["data_root"]  # 2026-11-19：設定畫面顯示目前的資料夾
+    assert body == {**SETTINGS, "data_root": body["data_root"], "meeting_types": list(MEETING_TYPES), "audio_device": "USBMIC", "speaker_device": "",
+                    "mic_options": [{"value": "", "label": "電腦預設"},
+                                    {"value": "USBMIC", "label": "麥克風 (USBMIC1.)"},
+                                    {"value": "麥克風排列 (Realtek(R) Audio)", "label": "麥克風排列 (Realtek(R) Audio)"}],
+                    "speaker_options": [{"value": "", "label": "電腦預設"},
+                                        {"value": "喇叭 (USBMIC1.)", "label": "喇叭 (USBMIC1.)"}],
+                    "wake_sensitivity": "medium",
+                    "wake_sensitivity_options": [{"value": "low", "label": "低（較少誤叫醒）"},
+                                                 {"value": "medium", "label": "中（預設）"},
+                                                 {"value": "high", "label": "高（較少漏聽）"}]}
+
+
+def test_post_settings_devices_written_and_need_restart(client, tmp_config):
+    import tomllib
+
+    r = client.post("/api/settings", json={**SETTINGS, "audio_device": "", "speaker_device": "喇叭 (USBMIC1.)"})
+    assert r.json() == {"ok": True, "restart_needed": True}
+    raw = tomllib.loads(tmp_config.read_text(encoding="utf-8"))
+    assert raw["audio_device"] == "" and raw["speaker_device"] == "喇叭 (USBMIC1.)"
+    assert client.get("/api/settings").json()["audio_device"] == ""
+
+
+def test_post_settings_wake_sensitivity(client, tmp_config):
+    import tomllib
+
+    r = client.post("/api/settings", json={**SETTINGS, "wake_sensitivity": "high"})
+    assert r.json() == {"ok": True, "restart_needed": True}
+    assert tomllib.loads(tmp_config.read_text(encoding="utf-8"))["wake_sensitivity"] == "high"
+    assert client.get("/api/settings").json()["wake_sensitivity"] == "high"
+    r = client.post("/api/settings", json={**SETTINGS, "wake_sensitivity": "超高"})
+    assert r.status_code == 422 and "wake_sensitivity" in r.json()["errors"]
+    r = client.post("/api/settings", json={**SETTINGS, "wake_sensitivity": "medium"})  # 和執行中相同
+    assert r.json()["restart_needed"] is False
+
+
+def test_post_settings_without_device_fields_keeps_devices(client, tmp_config):
+    import tomllib
+
+    r = client.post("/api/settings", json=SETTINGS)  # 舊版畫面沒有裝置欄位：不能把麥克風清掉
+    assert r.json()["restart_needed"] is False
+    assert tomllib.loads(tmp_config.read_text(encoding="utf-8"))["audio_device"] == "USBMIC"
+
+
+def test_post_settings_same_device_as_running_no_restart(client, state):
+    r = client.post("/api/settings", json={**SETTINGS, "audio_device": state.config.audio_device,
+                                            "speaker_device": state.config.speaker_device})
+    assert r.json()["restart_needed"] is False
+
+
+def test_get_settings_survives_device_listing_failure(state, tmp_config):
+    def boom():
+        raise OSError("PortAudio not available")
+
+    with TestClient(create_control_app(state, Hub(), config_path=tmp_config, device_names=boom)) as c:
+        body = c.get("/api/settings").json()
+    assert body["mic_options"] == [{"value": "", "label": "電腦預設"},
+                                   {"value": "USBMIC", "label": "USBMIC（目前沒有接上）"}]
 
 
 def test_post_settings_validates(client, tmp_config):
@@ -686,3 +788,105 @@ def test_web_has_no_hardcoded_name():
     for f in WEB_DIR.glob("*.*"):
         t = f.read_text(encoding="utf-8")
         assert "住院醫師" not in t and "晨會" not in t, f.name
+
+
+# ---- 還沒轉成 PDF 的 pptx：主持人畫面選到時才轉 ----
+
+def _slow_converter(state, make_pdf):
+    import threading
+
+    gate = threading.Event()
+
+    def convert(s):
+        assert gate.wait(5)
+        return make_pdf(["New " * 5], folder=s.parent, name=s.stem + ".pdf")
+
+    state.deck_converter = convert
+    return gate
+
+
+def test_decks_listing_includes_unconverted_pptx(control_client, state, config):
+    (config.folder("簡報") / "New.pptx").write_bytes(b"pptx")
+    listed = {d["name"]: d["path"] for d in control_client.get("/api/decks").json()}
+    assert set(listed) == {"D", "New"} and listed["New"].endswith("New.pptx")
+
+
+def test_choosing_a_pptx_converts_then_present_plays_it(control_client, state, config, make_pdf):
+    control_client.post("/api/present/stop")
+    src = config.folder("簡報") / "New.pptx"
+    src.write_bytes(b"pptx")
+    gate = _slow_converter(state, make_pdf)
+    r = control_client.post("/api/deck", json={"path": str(src)})
+    assert r.status_code == 200 and r.json()["converting"] == "New"
+    assert control_client.post("/api/present").json() == {"presenting": False, "converting": "New"}
+    gate.set()
+    state._convert_thread.join(5)
+    assert state.presenting and state.deck.name == "New"
+
+
+def test_choosing_a_pptx_without_powerpoint_is_rejected(control_client, state, config):
+    control_client.post("/api/present/stop")
+    src = config.folder("簡報") / "New.pptx"
+    src.write_bytes(b"pptx")
+    r = control_client.post("/api/deck", json={"path": str(src)})
+    assert r.status_code == 409 and "PowerPoint" in r.json()["detail"]
+
+
+def test_host_layout_folder_voice_quiz():
+    # 2026-11-19：資料夾放在自我檢查與簡報之間；打字發問併入「語音助理」；出題搬進「出題與作答」（有自己的出題重點）
+    import re
+
+    from xiaoshen.config import REPO_ROOT
+
+    host = (REPO_ROOT / "web" / "host.html").read_text(encoding="utf-8")
+
+    def section(sid):
+        m = re.search(rf'<(section|details) id="{sid}".*?</\1>', host, re.S)
+        assert m, sid
+        return m.group(0)
+
+    assert host.index('id="secChecks"') < host.index('id="secFolder"') < host.index('id="secDeck"')
+    assert 'id="setFolder"' in section("secFolder") and "更換資料夾…" in section("secFolder")
+    assert 'id="setFolder"' not in section("secTools")
+    assert 'id="secAsk"' not in host
+    voice = section("secVoice")
+    assert "語音助理" in voice and 'id="askText"' in voice and 'id="ask"' in voice and 'id="route"' in voice
+    assert 'id="gen"' not in voice and 'id="qn"' not in voice
+    quiz = section("secQuiz")
+    for el in ('id="quizFocus"', 'id="quizRoute"', 'id="qn"', 'id="gen"', 'id="quizJobs"', 'id="quizPhi"'):
+        assert el in quiz, el
+    js = (REPO_ROOT / "web" / "host.js").read_text(encoding="utf-8")
+    assert '$("quizFocus").value' in js and 'routeBody("quizRoute")' in js
+
+
+def test_voice_section_buttons_together_and_transcript_above_typing():
+    # 2026-11-19：「停止」固定在「叫醒」右邊（不會被擠到下一行）；語音辨識文字在打字發問上方
+    import re
+
+    from xiaoshen.config import REPO_ROOT
+
+    host = (REPO_ROOT / "web" / "host.html").read_text(encoding="utf-8")
+    voice = re.search(r'<section id="secVoice">.*?</section>', host, re.S).group(0)
+    assert re.search(r'<span class="voice-btns">\s*<button id="voiceWake">.*?</button>\s*<button id="voiceStop"', voice, re.S)
+    assert ".voice-btns" in host and "nowrap" in host.split(".voice-btns", 1)[1].split("}", 1)[0]
+    assert voice.index('id="voiceTranscript"') < voice.index('id="askText"')
+
+
+def test_host_phone_button_in_header():
+    # 2026-11-19：「主持人手機連線」放在頂端「⚙ 設定」與「結束程式」之間；一次性 QR 顯示在頂端下方的小面板
+    import re
+
+    from xiaoshen.config import REPO_ROOT
+
+    host = (REPO_ROOT / "web" / "host.html").read_text(encoding="utf-8")
+    header = re.search(r"<header>.*?</header>", host, re.S).group(0)
+    assert header.index('id="toolsToggle"') < header.index('id="hostPhonePair"') < header.index('id="quit"')
+    phone = re.search(r'<section id="secPhone">.*?</section>', host, re.S).group(0)
+    assert "hostPhonePair" not in phone and "hostPhoneQr" not in phone
+    panel = re.search(r'<div id="hostPhonePanel".*?</div>\s*</div>', host, re.S).group(0)
+    assert 'id="hostPhoneQr"' in panel and 'id="hostPhoneMsg"' in panel
+    # 2026-11-19：同一顆按鈕切換「收回 QR Code」；沒有 ×；收回不作廢連線碼，也沒有「解除主持人手機」
+    assert "hostPhoneClose" not in host
+    js = (REPO_ROOT / "web" / "host.js").read_text(encoding="utf-8")
+    assert "收回 QR Code" in js and "hostPhoneClose" not in js
+    assert "/api/host-phone/revoke" not in js and "解除主持人手機" not in js

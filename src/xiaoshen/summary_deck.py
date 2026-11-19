@@ -40,7 +40,7 @@ def _point_html(p: SummaryPoint) -> str:
     flag = "" if p.verified else f'<span style="color:{ORANGE}; font-weight:bold">［{UNVERIFIED}］</span> '
     color = "#222" if p.verified else ORANGE
     return (f'<li style="margin-bottom:10px"><div style="font-size:20px; color:{color}">{flag}{_e(p.zh)}</div>'
-            f'<div style="font-size:14px; color:#666">{_e(p.quote)}{where}</div></li>')
+            f'<div style="font-size:14px; color:#666">{_e(" ".join(p.quotes))}{where}</div></li>')
 
 
 def _body_html(points: list[SummaryPoint]) -> str:

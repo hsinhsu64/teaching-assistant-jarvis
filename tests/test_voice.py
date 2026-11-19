@@ -812,3 +812,30 @@ def test_voice_uses_detector_label(state, run):
         assert rig.backend.connects == 1 and state.voice_status == "listening"
         await rig.close()
     run(go())
+
+
+def test_own_name_in_reply_does_not_interrupt(state, run):
+    # 實機 2026-11-19：介紹自己時唸到「我是賈維斯」，喇叭的聲音被本機喚醒詞聽到 → 自己打斷自己。
+    # 這一輪回話裡有喚醒詞時，播完之前不因喚醒詞中斷；播完後恢復可插話。
+    async def go():
+        script = [LiveEvent("output_text", text="我是小"), LiveEvent("output_text", text="森，可以叫我"),
+                  LiveEvent("audio", data=b"A" * 4800), 0.2, LiveEvent("audio", data=b"B" * 4800),
+                  LiveEvent("turn_complete")]
+        rig = Rig(state, FakeLiveBackend(script))
+        await rig.start()
+        rig.detector.pending = ["小森"]
+        await rig.push()
+        await settle()
+        assert state.voice_status == "speaking"
+        stops = rig.speaker.stops
+        rig.detector.pending = ["小森"]  # 喇叭傳回來的自己的名字
+        await rig.push()
+        assert rig.speaker.stops == stops and state.voice_status == "speaking"  # 沒有中斷
+        await asyncio.sleep(0.3)
+        await settle()
+        assert rig.speaker.played == 9600  # 整段播完
+        rig.speaker.playing = False
+        await rig.push()  # 播完：回到聆聽，防護解除
+        assert state.voice_status == "listening" and rig.session._said_name is False
+        await rig.close()
+    run(go())

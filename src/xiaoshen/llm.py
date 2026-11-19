@@ -17,7 +17,7 @@ class LLMError(Exception):
 
 class LLM(Protocol):
     def generate_json(self, model: str, system: str, prompt: str, schema: dict,
-                      timeout: float | None = None) -> dict: ...
+                      timeout: float | None = None, thinking: str = "") -> dict: ...
 
 
 # 配額用完、模型過載、模型名稱不存在時改用下一個備援模型；其他錯誤（例如請求格式錯）不重試
@@ -31,7 +31,7 @@ class GeminiLLM:
         self.timeout = timeout  # 呼叫端沒指定時的總時限（150 秒，見 config.ai_timeout_seconds）
         self.last_model = ""
 
-    def _call(self, model: str, system: str, prompt: str, schema: dict, timeout: float) -> str:
+    def _call(self, model: str, system: str, prompt: str, schema: dict, timeout: float, thinking: str = "") -> str:
         from google import genai
         from google.genai import types
 
@@ -44,12 +44,14 @@ class GeminiLLM:
                 system_instruction=system,
                 response_mime_type="application/json",
                 response_json_schema=schema,
+                # 思考量（例 "low"）：只有指定時才設，其他呼叫用模型預設
+                **({"thinking_config": types.ThinkingConfig(thinking_level=thinking)} if thinking else {}),
             ),
         )
         return resp.text or ""
 
     def generate_json(self, model: str, system: str, prompt: str, schema: dict,
-                      timeout: float | None = None) -> dict:
+                      timeout: float | None = None, thinking: str = "") -> dict:
         if not os.environ.get("GEMINI_API_KEY"):
             raise LLMError("找不到 GEMINI_API_KEY")
         timeout = self.timeout if timeout is None else timeout
@@ -61,7 +63,7 @@ class GeminiLLM:
             if remaining < MIN_CALL_SECONDS:
                 raise LLMError(f"文字模型逾時（{timeout:.0f} 秒）") from last_err
             try:
-                text = self._call(m, system, prompt, schema, remaining)
+                text = self._call(m, system, prompt, schema, remaining, **({"thinking": thinking} if thinking else {}))
             except Exception as e:  # 網路、逾時、配額、模型名稱錯誤
                 last_err = e
                 if getattr(e, "code", None) in FALLBACK_CODES:

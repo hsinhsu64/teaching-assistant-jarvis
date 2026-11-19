@@ -16,7 +16,7 @@ def _summary(slides, full_text=True, truncated_at=None, paged=True):
 
 
 def _point(zh="類固醇為第一線治療", verified=True, page=1):
-    return SummaryPoint(zh, "Glucocorticoids are the first-line treatment for children.", page if verified else None,
+    return SummaryPoint(zh, ["Glucocorticoids are the first-line treatment for children."], page if verified else None,
                         verified)
 
 

@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import os
+import sys
+import subprocess
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -61,6 +63,35 @@ def suggested_folder() -> Path:
 def _inside_install_folder(folder: Path) -> bool:
     """資料夾是安裝資料夾本身或在它裡面（更新時會整個換新、移除時會被刪掉）。相對路徑以目前目錄（安裝資料夾）為準。"""
     target = Path(os.path.normcase(os.path.abspath(target_folder(Path(folder)).resolve())))
+    install = Path(os.path.normcase(os.path.abspath(REPO_ROOT.resolve())))
+    return target == install or target.is_relative_to(install)
+
+
+_PICK_SCRIPT = (
+    "import sys, tkinter as tk\n"
+    "from tkinter import filedialog\n"
+    "root = tk.Tk(); root.withdraw(); root.attributes('-topmost', True)\n"
+    "p = filedialog.askdirectory(title='選擇資料夾（可在視窗裡按「新增資料夾」建立）', initialdir=sys.argv[1], mustexist=False)\n"
+    "sys.stdout.reconfigure(encoding='utf-8'); print(p or '')\n"
+)
+
+
+def pick_folder_dialog(start: Path, runner=subprocess.run) -> str:
+    """跳出系統的選資料夾視窗，回傳選到的路徑；取消、失敗或逾時回空字串。
+    另開一個小程式跑：Mac 的視窗只能在程式的主執行緒開，伺服器的請求不在主執行緒上。"""
+    try:
+        proc = runner([sys.executable, "-c", _PICK_SCRIPT, str(start)], capture_output=True, text=True,
+                      encoding="utf-8", timeout=600)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if proc.returncode != 0:
+        return ""
+    return (proc.stdout or "").strip()
+
+
+def inside_install_folder(folder: Path) -> bool:
+    """這個資料夾本身就是安裝資料夾或在它裡面（更新、移除程式時會被刪掉）。"""
+    target = Path(os.path.normcase(os.path.abspath(Path(folder).resolve())))
     install = Path(os.path.normcase(os.path.abspath(REPO_ROOT.resolve())))
     return target == install or target.is_relative_to(install)
 

@@ -82,7 +82,8 @@ def test_voice_strings_carry_unconfirmed_label(state_factory, make_pdf):
     r = vt.handle(ToolCall("c", "ask", {"question": "q", "source": "deck"}))
     assert "derived" not in r  # §6.2c：預設不念內容；要求才念，念時照樣標明未經主治確認
     said = vt.handle(ToolCall("c2", "read_answer", {}))["message"]
-    assert "小森推導（未經主治確認）：差值 34" in said and "小森說明（未經主治確認）：未說明是否為靜脈血" in said
+    assert "小森推導（未經主治確認）：差值 34" in said
+    assert "未說明是否為靜脈血" not in said  # 2026-11-18：「為什麼沒推導」的說明不念，只留在主持人畫面
 
 
 def test_card_and_display_label_notes():
@@ -92,20 +93,19 @@ def test_card_and_display_label_notes():
 
     a = Answer("x", "q", "deck", "answered", cards=[Card("p", "Na 140", "今天的簡報 第 1 頁")],
                derivation_notes=["未說明是否為靜脈血"])
-    assert "小森說明（未經主治確認）：未說明是否為靜脈血" in card_html(a)
+    assert "未說明是否為靜脈血" not in card_html(a)  # 2026-11-18：說明只留在主持人畫面
 
 
 # ---- Important 4：翻頁或派題時收起字卡與放大圖 ----
 
 def test_page_turn_and_dispatch_clear_card_and_zoom(state, bank_question):
-    state.card = {"answer_id": "a", "path": "x"}
+    # 2026-11-19：全螢幕字卡已拿掉，只剩放大圖要收
     state.figure_zoom = 0
     state.goto(2)  # 第 3 頁沒有題庫題目，不會自動派題
-    assert state.card is None and state.figure_zoom is None
-    state.card = {"answer_id": "a", "path": "x"}
+    assert state.figure_zoom is None
     state.figure_zoom = 0
     state.start_run("single", [bank_question])
-    assert state.card is None and state.figure_zoom is None
+    assert state.figure_zoom is None
 
 
 # ---- Important 5：所有 PDF 操作共用一把鎖 ----

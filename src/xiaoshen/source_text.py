@@ -28,6 +28,7 @@ class SourceDoc:
     paged: bool        # True：PDF，有頁碼
     full_text: bool    # False：只讀到摘要
     note: str = ""
+    origin: str = ""   # 全文從哪裡來（fulltext.ORIGIN_LABEL 的鍵）
 
 
 def pdf_pages(data: bytes) -> list[str]:

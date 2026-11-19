@@ -181,7 +181,7 @@ def strip_followups(text: str) -> str:
 
 
 def other_citations(article: dict, mapped: list[dict]) -> list[dict]:
-    """文中出現、但編號對應不上的文獻（依標題去重）：OE 簡報列在「其他引用文獻」，不標編號。"""
+    """文中出現、但編號對應不上的文獻（依標題去重）：OE 簡報列在「OE 也引用了以下文獻（未標編號）」，不標編號。"""
     sa = (article.get("output") or {}).get("structured_article") or {}
     have = {c["title"] for c in mapped}
     out: list[dict] = []
@@ -195,6 +195,57 @@ def other_citations(article: dict, mapped: list[dict]) -> list[dict]:
                         have.add(entry["title"])
                         out.append(entry)
     return out
+
+
+_CITE_MARKER = re.compile(r"\[(\d+(?:\s*[,\-]\s*\d+)*)\]")
+
+
+def _paper_key(c: dict) -> str:
+    doi = str(c.get("doi") or "").strip().lower()
+    if doi:
+        return "doi:" + doi
+    title = re.sub(r"[^0-9a-z\u4e00-\u9fff]", "", str(c.get("title") or "").lower())
+    return "title:" + title if len(title) >= 20 else ""
+
+
+def _renumber(text: str, mapping: dict[int, int]) -> str:
+    def fix(m: re.Match) -> str:
+        nums: list[int] = []
+        for part in re.split(r"\s*,\s*", m.group(1)):
+            if "-" in part:
+                a, b = (int(x) for x in re.split(r"\s*-\s*", part)[:2])
+                nums += list(range(a, b + 1)) if a <= b else [a, b]
+            else:
+                nums.append(int(part))
+        if not any(n in mapping for n in nums):
+            return m.group(0)  # 沒有重複的編號：照原文
+        out = list(dict.fromkeys(mapping.get(n, n) for n in nums))
+        return "[" + ", ".join(str(n) for n in out) + "]"
+    return _CITE_MARKER.sub(fix, text)
+
+
+def merge_duplicate_citations(oe: OEResult) -> OEResult:
+    """OE 常把同一篇（同 DOI，沒有 DOI 時同篇名）分成好幾個編號引用：一律改成最小的那個編號，
+    文獻只留一筆；內文、圖、表的編號一起改（2026-11-19）。"""
+    first: dict[str, int] = {}
+    mapping: dict[int, int] = {}
+    for c in sorted((c for c in oe.citations if c.get("index") is not None), key=lambda c: c["index"]):
+        key = _paper_key(c)
+        if not key:
+            continue
+        if key in first:
+            mapping[c["index"]] = first[key]
+        else:
+            first[key] = c["index"]
+    if mapping:
+        oe.citations = [c for c in oe.citations if c.get("index") not in mapping]
+        oe.answer, oe.raw = _renumber(oe.answer, mapping), _renumber(oe.raw, mapping)
+        for f in list(oe.figures) + list(oe.deck_figures):
+            if f.get("index") in mapping:
+                f["index"] = mapping[f["index"]]
+        oe.tables = tables_from_answer(oe.answer)
+    oe.other_citations = [c for c in oe.other_citations if not _paper_key(c) or _paper_key(c) not in first]
+    return oe
 
 
 def deck_figures(article: dict, figures: list[dict], answer_raw: str) -> tuple[list[dict], int]:
@@ -249,8 +300,9 @@ def ask_openevidence(question: str, script: Path, timeout: float = 180, runner=s
             fig_json = json.loads(Path(fig_path).read_text(encoding="utf-8"))
             figures = figures_by_marker(article, fig_json)
             dfigs, missing = deck_figures(article, fig_json, raw)
-    return OEResult(str(data.get("article_id") or ""), answer, citations, figures, tables_from_answer(answer),
-                    raw=raw, other_citations=others, deck_figures=dfigs, missing_figures=missing)
+    return merge_duplicate_citations(OEResult(str(data.get("article_id") or ""), answer, citations, figures,
+                                              tables_from_answer(answer), raw=raw, other_citations=others,
+                                              deck_figures=dfigs, missing_figures=missing))
 
 
 def oe_auth_ok(script: Path, runner=subprocess.run) -> bool:

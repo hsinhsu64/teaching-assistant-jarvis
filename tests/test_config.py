@@ -85,3 +85,20 @@ def test_source_has_no_personal_defaults():
     text = (REPO_ROOT / "src/xiaoshen/config.py").read_text(encoding="utf-8")
     # 私人資料夾名稱與雲端路徑由發行前的隱私掃描把關（開發用 repo 的測試）
     assert "USBMIC" not in text
+
+
+def test_arrow_up_down_flip_pages_by_default(tmp_path):
+    # 2026-11-18：鍵盤 ↓ 下一頁、↑ 上一頁（投影幕和主持人畫面都適用）
+    c = load_config(tmp_path / "nope.toml")
+    assert c.keys_next == ["PageDown", "ArrowRight", "ArrowDown", " "]
+    assert c.keys_prev == ["PageUp", "ArrowLeft", "ArrowUp"]
+
+
+def test_js_and_example_defaults_match_config():
+    c = Config()
+    js = (REPO_ROOT / "web" / "quizview.js").read_text(encoding="utf-8")
+    example = (REPO_ROOT / "config.example.toml").read_text(encoding="utf-8")
+    for keys in (c.keys_next, c.keys_prev):
+        listed = ", ".join(f'"{k}"' for k in keys)
+        assert f"[{listed}]" in js
+        assert f"[{listed}]" in example

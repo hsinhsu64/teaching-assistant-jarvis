@@ -1,6 +1,6 @@
 [project]
 name = "xiaoshen"
-version = "0.1.0"
+version = "0.2.0"
 description = "教學助理賈維斯：生成式 AI 語音臨床教學助理"
 authors = [{ name = "hsinhsu64" }]
 requires-python = ">=3.12"

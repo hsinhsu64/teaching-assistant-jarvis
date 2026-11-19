@@ -42,6 +42,7 @@
     .qr-row { display: flex; gap: 1vw; align-items: center; }
     .qr-row img { width: 9vw; height: 9vw; background: #fff; border-radius: 6px; padding: 4px; }
     .tunnel-down { color: #ffb4b4; }
+    .tunnel-pending { opacity: 0.7; }
     .exam-list { overflow: auto; display: flex; flex-direction: column; gap: 1vh; }
     .rate { float: right; font-variant-numeric: tabular-nums; }
     .ask-q { font-size: 0.9em; opacity: .8; }
@@ -85,8 +86,6 @@
     #sourceview .sv-note { font-size: 1.6vw; color: #ffe08a; }
     .card-no { display: inline-block; min-width: 1.6em; margin-right: .4em; padding: 0 .3em; border-radius: 4px;
       background: rgba(255,255,255,.18); text-align: center; font-weight: 700; }
-    #cardview { position: fixed; inset: 0; z-index: 5; background: #000; display: flex; align-items: center; justify-content: center; cursor: pointer; }
-    #cardview img { max-width: 100vw; max-height: 100vh; }
     .hide-hint { margin-top: auto; font-size: 0.7em; opacity: .55; text-align: center; }
     /* ---- 主畫面（§6.0，草圖 mockups/03-jarvis-home.html）---- */
     #hud { --cyan:#5ee7ff; --cyan2:#1aa6c9; --line:rgba(94,231,255,.35); --ink:#d9f6ff; --dim:#6fa9bd; --warn:#ffcf66;
@@ -160,7 +159,6 @@
   <div id="oelinks"></div>
   <div id="oetoast" style="display:none"></div>
   <div id="figzoom" style="display:none"></div>
-  <div id="cardview" style="display:none"></div>
   <div id="sourceview" style="display:none"></div>
   <aside id="drawer"></aside>
   <script src="/static/quizview.js"></script>

@@ -9,7 +9,6 @@ const lightEl = document.getElementById("light");
 const drawerEl = document.getElementById("drawer");
 const phiEl = document.getElementById("phi");
 const zoomEl = document.getElementById("figzoom");
-const cardEl = document.getElementById("cardview");
 const sourceEl = document.getElementById("sourceview");
 const linksEl = document.getElementById("oelinks");
 const voiceLight = () => ({
@@ -121,6 +120,7 @@ function renderLight() {
 }
 
 function qrBlock() {
+  if (!snap.phone_url && snap.phone_pending) return `<div class="tunnel-pending">手機作答準備中…</div>`;
   if (!snap.phone_url) return `<div class="tunnel-down">手機作答暫停：通道離線</div>`;
   return `<div class="qr-row"><img src="/qr.png?u=${encodeURIComponent(snap.phone_url)}" alt="QR"><div>掃碼作答</div></div>`;
 }
@@ -130,8 +130,7 @@ const ROUTE_LABEL = { openevidence: "OpenEvidence", pubmed: "PubMed", model: "Ge
 
 function derivedHtml(a) {
   return (a.derivations || []).map((d) => `<div class="card ans-card ans-derived">
-      <div><b>${esc(appName())}推導（未經主治確認）：</b>${esc(d.text)}</div><div class="source">依據：${d.sources.map(esc).join("；")}</div></div>`).join("")
-    + (a.derivation_notes || []).map((n) => `<div class="card ans-error">${esc(appName())}說明（未經主治確認）：${esc(n)}</div>`).join("");
+      <div><b>${esc(appName())}推導（未經主治確認）：</b>${esc(d.text)}</div><div class="source">依據：${d.sources.map(esc).join("；")}</div></div>`).join("");  // 「為什麼沒推導」的說明只給主持人畫面
 }
 
 function tablesHtml(a) {
@@ -146,14 +145,6 @@ function figuresHtml(a) {
       <img src="${esc(f.url)}" alt="${esc(f.name)}" data-fig="${i}">
       <figcaption>${esc(f.name)}${f.caption ? "：" + esc(f.caption) : ""}<br>出自 ${esc(f.source)}</figcaption>
     </figure>`).join("");
-}
-
-function renderCard() {
-  const c = snap && snap.card;
-  if (!c) { cardEl.style.display = "none"; cardEl.innerHTML = ""; return; }
-  const src = `${c.url}?v=${encodeURIComponent(c.answer_id)}`;
-  if (!cardEl.querySelector(`img[src="${src}"]`)) cardEl.innerHTML = `<img src="${src}" alt="字卡">`;
-  cardEl.style.display = "";
 }
 
 function renderZoom() {
@@ -388,7 +379,6 @@ function applySnapshot(s) {
   renderHud();
   renderDrawer();
   renderZoom();
-  renderCard();
   renderSource();
 }
 
@@ -442,7 +432,35 @@ hudRightEl.addEventListener("click", (ev) => {
 });
 sourceEl.addEventListener("click", () => { if (online) postJSON("/api/source/close"); });
 zoomEl.addEventListener("click", () => { if (online) postJSON("/api/answer/figure", { index: null }); });
-cardEl.addEventListener("click", () => { if (online) postJSON("/api/answer/card/hide"); });
+
+// ---- 滑鼠翻頁（只在播放簡報時）：左鍵／滾輪往下＝下一頁，右鍵／滾輪往上＝上一頁 ----
+// 點到抽屜、原文、放大圖、卡片、連結等有自己功能的地方，照原本功能，不翻頁。
+const MOUSE_SKIP = "#drawer, #figzoom, #sourceview, #oelinks, #vconfirm, #hud, a, button, input, select, textarea";
+const WHEEL_QUIET_MS = 250;   // 滾輪停下這麼久才算下一次；觸控板一次滑動（含慣性）只翻一頁
+let wheelLockUntil = 0;
+
+function mouseNavAllowed(ev) {
+  if (!snap || !snap.presenting) return false;
+  return !(ev.target && ev.target.closest && ev.target.closest(MOUSE_SKIP));
+}
+
+document.addEventListener("click", (ev) => {
+  if (ev.button !== 0 || !mouseNavAllowed(ev)) return;
+  nav("next");
+});
+document.addEventListener("contextmenu", (ev) => {
+  if (!mouseNavAllowed(ev)) return;
+  ev.preventDefault();   // 不跳出瀏覽器右鍵選單
+  nav("prev");
+});
+document.addEventListener("wheel", (ev) => {
+  if (!mouseNavAllowed(ev) || Math.abs(ev.deltaY) < 1) return;
+  ev.preventDefault();
+  const now = performance.now();
+  const locked = now < wheelLockUntil;
+  wheelLockUntil = now + WHEEL_QUIET_MS;
+  if (!locked) nav(ev.deltaY > 0 ? "next" : "prev");
+}, { passive: false });
 
 document.addEventListener("keydown", makeKeyHandler(() => keys, {
   next: () => nav("next"),

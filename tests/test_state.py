@@ -1,3 +1,4 @@
+import time
 import pytest
 
 from xiaoshen.quiz import Question
@@ -141,6 +142,15 @@ def test_phone_link_down_hides_url_and_marks_check(state):
     assert state.phone_url() is None and state.checks[0]["level"] == "fail" and calls
     check_phone_link(state, http_get=lambda u: 200)
     assert state.phone_url() and state.checks[0]["level"] == "ok"
+
+
+def test_phone_url_hidden_while_link_pending(state):
+    state.public_base = "https://x.trycloudflare.com"
+    state.phone_pending = True
+    snap = state.snapshot("display")
+    assert snap["phone_url"] is None and snap["phone_pending"] is True
+    state.phone_pending = False
+    assert state.snapshot("display")["phone_pending"] is False and state.phone_url()
 
 
 def test_phone_link_check_exception_counts_as_down(state):
@@ -479,3 +489,154 @@ def test_stop_oe_deck_leaves_other_decks_alone(state, make_pdf, config):
     assert state.stop_oe_deck() is False and state.presenting
     state.play_summary(make_pdf(["S"], folder=config.folder("紀錄") / "摘要簡報", name="s.pdf"))
     assert state.stop_oe_deck() is False and state.temp_kind == "summary"
+
+
+# ---- 播放時才把 pptx 轉成 PDF（開機不轉） ----
+
+def _pptx(folder, name, age=0.0):
+    import os
+
+    path = folder / name
+    path.write_bytes(b"pptx")
+    t = time.time() - 100 + age
+    os.utime(path, (t, t))
+    return path
+
+
+def _pdf_maker(make_pdf, gate=None, calls=None):
+    """假轉檔：寫出同名的真 PDF；gate 有給就等它放行（模擬轉很久）。"""
+    def convert(src):
+        if calls is not None:
+            calls.append(src.name)
+        if gate is not None:
+            assert gate.wait(5)
+        return make_pdf(["Converted " + src.stem], folder=src.parent, name=src.stem + ".pdf")
+    return convert
+
+
+def _finish(state):
+    state._convert_thread.join(5)
+    assert not state._convert_thread.is_alive()
+
+
+def test_request_deck_plays_a_ready_pdf_at_once(state_factory, make_pdf):
+    st = state_factory()
+    pdf = make_pdf(["A"], folder=st.config.folder("簡報"), name="A.pdf")
+    assert st.request_deck(pdf, play=True) == "ready"
+    assert st.presenting and st.deck.name == "A" and st.deck_converting is None
+
+
+def test_request_deck_uses_the_pdf_of_an_already_converted_pptx(state_factory, make_pdf):
+    st = state_factory()
+    folder = st.config.folder("簡報")
+    src = _pptx(folder, "A.pptx")
+    make_pdf(["A"], folder=folder, name="A.pdf")  # 比 pptx 新
+    st.deck_converter = lambda s: pytest.fail("不該再轉")
+    assert st.request_deck(src, play=True) == "ready" and st.deck.name == "A"
+
+
+def test_request_deck_converts_a_pptx_then_plays_it(state_factory, make_pdf):
+    import threading
+
+    st = state_factory()
+    folder = st.config.folder("簡報")
+    src = _pptx(folder, "New.pptx")
+    gate = threading.Event()
+    st.deck_converter = _pdf_maker(make_pdf, gate)
+    assert st.request_deck(src, play=True) == "converting"
+    assert st.snapshot("host")["deck_converting"] == {"name": "New", "play": True}
+    assert not st.presenting
+    gate.set()
+    _finish(st)
+    assert st.presenting and st.deck.name == "New" and st.deck_converting is None
+    assert folder / "New.pdf" in st.deck_paths and src not in st.deck_paths
+
+
+def test_request_deck_open_only_then_play_while_converting(state_factory, make_pdf):
+    """主持人畫面：下拉選單選了還沒轉的 pptx 先轉；轉檔中按「播放簡報」，轉完就直接播放。"""
+    import threading
+
+    st = state_factory()
+    src = _pptx(st.config.folder("簡報"), "New.pptx")
+    gate = threading.Event()
+    calls = []
+    st.deck_converter = _pdf_maker(make_pdf, gate, calls)
+    assert st.request_deck(src, play=False) == "converting"
+    assert st.request_deck(src, play=True) == "converting"  # 同一份：不重轉，改成轉完播放
+    gate.set()
+    _finish(st)
+    assert calls == ["New.pptx"] and st.presenting and st.deck.name == "New"
+
+
+def test_request_deck_open_only_does_not_project(state_factory, make_pdf):
+    st = state_factory()
+    src = _pptx(st.config.folder("簡報"), "New.pptx")
+    st.deck_converter = _pdf_maker(make_pdf)
+    assert st.request_deck(src, play=False) == "converting"
+    _finish(st)
+    assert st.deck.name == "New" and not st.presenting
+
+
+def test_request_deck_one_conversion_at_a_time(state_factory, make_pdf):
+    import threading
+
+    st = state_factory()
+    folder = st.config.folder("簡報")
+    a, b = _pptx(folder, "A.pptx"), _pptx(folder, "B.pptx")
+    gate = threading.Event()
+    st.deck_converter = _pdf_maker(make_pdf, gate)
+    assert st.request_deck(a, play=True) == "converting"
+    assert st.request_deck(b, play=True) == "busy"
+    gate.set()
+    _finish(st)
+    assert st.deck.name == "A"
+
+
+def test_request_deck_without_powerpoint_is_an_error(state_factory):
+    st = state_factory()
+    src = _pptx(st.config.folder("簡報"), "New.pptx")
+    assert st.request_deck(src, play=True) == "error"
+    assert not st.presenting and any("New.pptx" in w for w in st.warnings)
+
+
+def test_request_deck_conversion_failure_warns_and_stays(state_factory, make_pdf):
+    st = state_factory()
+    folder = st.config.folder("簡報")
+    keep = make_pdf(["Keep"], folder=folder, name="Keep.pdf")
+    st.play(keep)
+    src = _pptx(folder, "New.pptx", age=50)
+
+    def broken(s):
+        raise RuntimeError("PowerPoint busy")
+
+    st.deck_converter = broken
+    assert st.request_deck(src, play=True) == "converting"
+    _finish(st)
+    assert st.deck.name == "Keep" and st.presenting and st.deck_converting is None
+    assert any("New.pptx" in w and "busy" in w for w in st.warnings)
+
+
+def test_newest_deck_entry_is_today_when_no_deck_is_open(state_factory):
+    st = state_factory()
+    folder = st.config.folder("簡報")
+    new = _pptx(folder, "New.pptx", age=50)
+    _pptx(folder, "Old.pptx")
+    from xiaoshen.converter import list_deck_entries
+
+    st.set_deck_paths(list_deck_entries(folder))
+    assert st.deck is None and st.today_deck_path() == new
+
+
+def test_refresh_deck_list_opens_newest_pdf_but_waits_for_a_pptx(state_factory, make_pdf):
+    st = state_factory()
+    folder = st.config.folder("簡報")
+    make_pdf(["Old"], folder=folder, name="Old.pdf")
+    new = _pptx(folder, "New.pptx", age=500)  # 最新的是還沒轉的 pptx：開機不轉、也不改開舊的
+    st.refresh_deck_list()
+    assert st.deck is None and st.deck_paths[0] == new
+    make_pdf(["New"], folder=folder, name="New.pdf")  # 背景轉好了
+    import os
+
+    os.utime(folder / "New.pdf", (new.stat().st_mtime, new.stat().st_mtime))
+    st.refresh_deck_list()
+    assert st.deck.name == "New" and not st.presenting

@@ -130,8 +130,8 @@ def test_paired_phone_cannot_pair_or_revoke(gate, state):
 def test_phone_side_routes_stay_on_phone_app_when_paired(gate, state):
     pair(gate, state)
     assert gate.get("/q", params={"t": state.token}).status_code == 200
-    assert gate.post("/api/phone/control-enabled", json={"enabled": False}).status_code == 200  # 主持人開關走控制端
-    assert state.phone_control_enabled is False
+    assert gate.post("/api/phone/control-enabled", json={"enabled": True}).status_code == 200  # 主持人開關走控制端
+    assert state.phone_control_enabled is True  # 預設關（2026-11-18），打開才看得出開關有作用
 
 
 def test_revoked_phone_loses_access(gate, ctl, state):

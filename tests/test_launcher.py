@@ -88,6 +88,23 @@ def test_quit_handler_sets_event_from_another_thread():
     assert asyncio.run(scenario())
 
 
+def test_quit_handler_accepts_longer_delay_for_voice():
+    import asyncio
+
+    from xiaoshen.launcher import make_quit_handler
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        quit_event = asyncio.Event()
+        handler = make_quit_handler(loop, quit_event, delay=0.01)
+        start = loop.time()
+        handler(0.3)  # 語音結束：等助理把話說完才關
+        await asyncio.wait_for(quit_event.wait(), 2)
+        return loop.time() - start
+
+    assert asyncio.run(scenario()) >= 0.25
+
+
 def test_close_app_windows_only_targets_xiaoshen_profiles(tmp_path):
     from xiaoshen.launcher import close_app_windows
 

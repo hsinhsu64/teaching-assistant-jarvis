@@ -119,7 +119,7 @@ def test_reference_pages_and_link_map(tmp_path):
     ref_page = next(i for i, t in enumerate(pages) if "參考文獻" in t and "KDOQI Commentary" in t)
     refs = {l["ref"] for l in deck_links(p, ref_page)}
     assert {"n:3", "n:4", "o:0"} <= refs
-    assert "其他引用文獻（無法確認對應編號）" in "".join(pages)
+    assert "OE 也引用了以下文獻（未標編號）" in "".join(pages)  # 2026-11-19 改名，較好懂
     assert info.refs == 3
     for l in deck_links(p, ref_page):
         assert 0 <= l["x0"] < l["x1"] <= 1 and 0 <= l["y0"] < l["y1"] <= 1
@@ -143,7 +143,7 @@ def test_oe_deck_without_mapped_citations(tmp_path):
     assert info.refs == 0 and not any("參考文獻" in t for t in _texts(p)[1:])
     p2 = tmp_path / "oe2.pdf"
     info2 = render_oe_deck("q", _oe(citations=[], others=[_cit(None, "Only other", href="https://x")]), "", p2)
-    assert info2.refs == 1 and any("其他引用文獻" in t for t in _texts(p2))
+    assert info2.refs == 1 and any("OE 也引用了以下文獻" in t for t in _texts(p2))
 
 
 def test_followups_not_in_deck(tmp_path):

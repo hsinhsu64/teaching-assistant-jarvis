@@ -147,10 +147,10 @@ def test_unknown_tool_error(deck_state):
 
 
 def test_tool_schema_and_prompt():
-    assert [t["name"] for t in TOOLS] == ["ask", "make_quiz", "open_reference", "next_page", "prev_page",
+    assert [t["name"] for t in TOOLS] == ["ask", "about_me", "ask_results", "summarize_papers", "read_results", "make_quiz", "open_reference", "next_page", "prev_page",
                                       "goto_page", "host_only_command", "play_deck", "end_deck",
                                       "show_source", "close_source", "summarize_source",
-                                      "open_citation", "read_answer"]
+                                      "open_citation", "read_answer", "quit_app"]
     assert "不得用自己的知識" in system_instruction() and "host_only_command" in system_instruction()
 
 
@@ -682,3 +682,456 @@ def test_open_citation_by_voice(deck_state):
     vt = VoiceTools(deck_state, FakeSummaryJobs(None), Library(deck_state.config.folder("參考資料")), viewer=V())
     assert vt.handle(call("open_citation", number=3))["status"] == "ok" and calls == ["n:3"]
     assert "open_citation" in system_instruction()
+
+
+def test_instruction_tells_how_to_pronounce_jia():
+    """實機聽起來把「賈」唸成「加」：名字有「賈」時提示讀音；沒有就不加這句。"""
+    from xiaoshen.persona import Persona, set_persona
+
+    assert "「賈」唸第三聲" in system_instruction() and "不要唸成「加」" in system_instruction()
+    set_persona(Persona("小森"))
+    assert "唸第三聲" not in system_instruction()
+
+
+# ---- 語音結束程式：要使用者親口說「確定結束」才關 ----
+
+@pytest.fixture
+def quit_tools(deck_state):
+    quits = []
+    deck_state.quit_handler = lambda delay=None: quits.append(delay)
+    vt = make_tools(deck_state, FakeLLM(answered([])))
+    vt.clock = lambda: 100.0
+    vt.hear("賈維斯，結束程式")
+    return vt, quits
+
+
+def test_quit_asks_for_confirmation_first(quit_tools):
+    vt, quits = quit_tools
+    r = vt.handle(call("quit_app"))
+    assert r["status"] == "confirm_quit" and "確定結束" in r["message"] and quits == []
+    assert any(t["name"] == "quit_app" for t in TOOLS) and "quit_app" in system_instruction()
+
+
+def test_quit_model_cannot_confirm_by_itself(quit_tools):
+    vt, quits = quit_tools
+    vt.handle(call("quit_app"))
+    r = vt.handle(call("quit_app", confirm=True))  # 使用者還沒開口，模型自己說「確定」
+    assert r["status"] == "confirm_quit" and quits == []
+
+
+def test_quit_after_user_says_confirm(quit_tools):
+    from xiaoshen.voice_tools import VOICE_QUIT_DELAY
+
+    vt, quits = quit_tools
+    vt.handle(call("quit_app"))
+    vt.hear("確定結束")
+    r = vt.handle(call("quit_app", confirm=True))
+    assert r["status"] == "ok" and quits == [VOICE_QUIT_DELAY]
+    assert VOICE_QUIT_DELAY >= 2  # 先讓助理把「程式即將結束」說完
+
+
+def test_quit_cancelled_when_user_does_not_confirm(quit_tools):
+    vt, quits = quit_tools
+    vt.handle(call("quit_app"))
+    vt.hear("不要，取消")
+    r = vt.handle(call("quit_app", confirm=True))
+    assert r["status"] == "cancelled" and quits == []
+    vt.hear("確定結束")  # 取消後要重新說「結束程式」，不能直接確認
+    assert vt.handle(call("quit_app", confirm=True))["status"] == "confirm_quit" and quits == []
+
+
+def test_quit_confirmation_expires(quit_tools):
+    from xiaoshen.voice_tools import QUIT_CONFIRM_TTL
+
+    vt, quits = quit_tools
+    vt.handle(call("quit_app"))
+    vt.hear("確定結束")
+    vt.clock = lambda: 100.0 + QUIT_CONFIRM_TTL + 1
+    r = vt.handle(call("quit_app", confirm=True))
+    assert r["status"] == "expired" and quits == []
+
+
+def test_quit_without_launcher_points_to_button(quit_tools):
+    vt, quits = quit_tools
+    vt.state.quit_handler = None
+    vt.handle(call("quit_app"))
+    vt.hear("確定結束")
+    r = vt.handle(call("quit_app", confirm=True))
+    assert r["status"] == "error" and "結束程式" in r["message"]
+
+
+# ---- 還沒轉成 PDF 的 pptx：播放時才轉 ----
+
+def _slow_pptx_tools(hud_tools, make_pdf):
+    import threading
+
+    folder = hud_tools.state.config.folder("簡報")
+    src = folder / "腎移植.pptx"
+    src.write_bytes(b"pptx")
+    gate = threading.Event()
+
+    def convert(s):
+        assert gate.wait(5)
+        return make_pdf(["移植 " * 5], folder=s.parent, name=s.stem + ".pdf")
+
+    hud_tools.state.deck_converter = convert
+    hud_tools.state.set_deck_paths([src, *hud_tools.state.deck_paths])
+    return gate
+
+
+def test_play_deck_pptx_says_it_needs_time_then_plays(hud_tools, make_pdf):
+    gate = _slow_pptx_tools(hud_tools, make_pdf)
+    r = hud_tools.handle(call("play_deck", name="腎移植"))
+    assert r == {"status": "converting", "message": "這份簡報要先轉成 PDF，需要一段時間，好了會自動播放"}
+    assert not hud_tools.state.presenting
+    gate.set()
+    hud_tools.state._convert_thread.join(5)
+    assert hud_tools.state.presenting and hud_tools.state.deck.name == "腎移植"
+
+
+def test_play_deck_while_another_pptx_converts_is_busy(hud_tools, make_pdf):
+    gate = _slow_pptx_tools(hud_tools, make_pdf)
+    folder = hud_tools.state.config.folder("簡報")
+    other = folder / "急性腎損傷.pptx"
+    other.write_bytes(b"pptx")
+    hud_tools.state.set_deck_paths([other, *hud_tools.state.deck_paths])
+    hud_tools.handle(call("play_deck", name="腎移植"))
+    r = hud_tools.handle(call("play_deck", name="急性腎損傷"))
+    assert r["status"] == "busy" and "腎移植" in r["message"]
+    gate.set()
+    hud_tools.state._convert_thread.join(5)
+
+
+def test_play_todays_deck_when_newest_is_still_pptx(hud_tools, make_pdf):
+    gate = _slow_pptx_tools(hud_tools, make_pdf)
+    hud_tools.state.deck = None  # 開機時最新的是還沒轉的 pptx：沒有開著的簡報
+    r = hud_tools.handle(call("play_deck", name="今天的簡報"))
+    assert r["status"] == "converting"
+    gate.set()
+    hud_tools.state._convert_thread.join(5)
+    assert hud_tools.state.deck.name == "腎移植"
+
+
+def test_play_deck_pptx_without_powerpoint(hud_tools):
+    folder = hud_tools.state.config.folder("簡報")
+    src = folder / "腎移植.pptx"
+    src.write_bytes(b"pptx")
+    hud_tools.state.set_deck_paths([src, *hud_tools.state.deck_paths])
+    r = hud_tools.handle(call("play_deck", name="腎移植"))
+    assert r["status"] == "error" and "PowerPoint" in r["message"]
+
+
+# ---- 問題分類型（2026-11-18）：介紹自己、問目前列出的文獻 ----
+
+from xiaoshen import persona  # noqa: E402
+from xiaoshen.answering import Answer, citation_label  # noqa: E402
+from xiaoshen.voice_tools import about_me_text  # noqa: E402
+
+ABS2 = "This randomized controlled trial enrolled 240 children and compared rituximab with tacrolimus."
+
+
+def lit_base():
+    refs = {1: {"index": 1, "title": "P1", "first_author": "Lee", "journal": "Kidney Int", "year": "2019"},
+            2: {"index": 2, "title": "P2", "first_author": "Wang", "journal": "N Engl J Med", "year": "2025"}}
+    return Answer("oe1", "SRNS？", "openevidence", "answered", references=refs)
+
+
+class AbstractViewer:
+    def abstract_for(self, ref):
+        return ABS2, ref.get("title", "")
+
+
+def test_about_me_uses_persona(deck_state):
+    r = make_tools(deck_state, FakeLLM(answered([]))).handle(call("about_me"))
+    # 實機 2026-11-19：回 "ok" 時模型拿到介紹卻沒唸 → 狀態標明要唸
+    assert r["status"] == "speak" and r["message"] == about_me_text()
+    assert persona.current().display_name in r["message"] and persona.wake_word() in r["message"]
+    assert chr(0x5c0f) + chr(0x814e) not in r["message"]  # 舊名不寫死（發行檔案不得出現這兩個字）
+
+
+def test_ask_results_answered_says_projected_only(deck_state):
+    deck_state.results_base = lit_base()
+    vt = make_tools(deck_state, FakeLLM({"kind": "answer", "answer_zh": "最新的是第 2 篇（2025）", "refs": [2]}))
+    r = vt.handle(call("ask_results", question="哪一篇最新"))
+    assert r == {"status": "answered", "message": "已投影"}
+    assert vt.handle(call("read_answer"))["message"] == "最新的是第 2 篇（2025）"  # 要求才念
+
+
+def test_ask_results_needs_reading_message(deck_state):
+    deck_state.results_base = lit_base()
+    vt = make_tools(deck_state, FakeLLM({"kind": "needs_reading", "answer_zh": "", "refs": []}))
+    assert vt.handle(call("ask_results", question="哪幾篇是 RCT")) == {
+        "status": "needs_reading", "message": "我讀一下文獻再回答"}
+
+
+def test_ask_results_no_results_message(deck_state):
+    vt = make_tools(deck_state, FakeLLM({"kind": "answer", "answer_zh": "x", "refs": [1]}))
+    assert vt.handle(call("ask_results", question="哪一篇最新")) == {
+        "status": "no_results", "message": "目前投影上沒有文獻清單"}
+
+
+def test_ask_results_error_message(deck_state):
+    deck_state.results_base = lit_base()
+    vt = make_tools(deck_state, FakeLLM({"kind": "answer", "answer_zh": "第 9 篇", "refs": [9]}))
+    r = vt.handle(call("ask_results", question="哪一篇最新"))
+    assert r["status"] == "error" and r["message"] == "無法從文獻清單回答"
+
+
+def test_ask_results_phi_blocked(deck_state):
+    deck_state.results_base = lit_base()
+    llm = FakeLLM({"kind": "answer", "answer_zh": "x", "refs": [1]})
+    vt = make_tools(deck_state, llm)
+    vt.hear("A123456789 這床的病人")
+    assert vt.handle(call("ask_results", question="那篇最新"))["status"] == "blocked"
+    assert llm.calls == []
+
+
+def test_read_results_counts_cards(deck_state):
+    base = lit_base()
+    deck_state.results_base = base
+    llm = FakeLLM({"status": "answered", "summary_zh": "", "clarify_zh": "",
+                   "cards": [{"point_zh": "第 2 篇是 RCT", "quote": "This randomized controlled trial enrolled 240",
+                              "source_label": citation_label(base.references[2]), "page": 1}]})
+    vt = make_tools(deck_state, llm)
+    vt.viewer = AbstractViewer()
+    assert vt.handle(call("read_results", question="哪幾篇是 RCT")) == {
+        "status": "answered", "message": "找到 1 張字卡，已投影"}
+
+
+def test_read_results_without_viewer(deck_state):
+    deck_state.results_base = lit_base()
+    vt = make_tools(deck_state, FakeLLM(answered([])))
+    assert vt.handle(call("read_results", question="q")) == {"status": "error", "message": "原文功能未啟用"}
+
+
+def test_read_results_no_results(deck_state):
+    vt = make_tools(deck_state, FakeLLM(answered([])))
+    vt.viewer = AbstractViewer()
+    assert vt.handle(call("read_results", question="q"))["message"] == "目前投影上沒有文獻清單"
+
+
+def test_question_type_tools_declared():
+    assert {"about_me", "ask_results", "read_results"} <= {t["name"] for t in TOOLS}
+
+
+def test_prompt_mentions_question_types():
+    text = system_instruction()
+    for word in ("about_me", "ask_results", "read_results", "needs_reading", "今天的簡報"):
+        assert word in text
+
+
+# ---- 後端保險：模型沒指定來源就送 OE 時，用字詞改正（2026-11-18） ----
+
+from xiaoshen.voice_tools import deck_intent, results_intent  # noqa: E402
+
+
+@pytest.mark.parametrize("q", ["摘要今天的簡報", "這份簡報的重點", "簡報內容有哪些"])
+def test_deck_intent_phrases(q):
+    assert deck_intent(q)
+
+
+def test_deck_intent_lets_clinical_through():
+    assert not deck_intent("今天的病人怎麼處理")
+
+
+@pytest.mark.parametrize("q", ["你列出的文獻中哪一篇是最新的", "剛剛的文獻有幾篇", "第 3 篇是哪個期刊",
+                               "第三篇的作者是誰", "這幾篇有隨機對照試驗嗎", "這些文獻哪篇最大"])
+def test_results_intent_phrases(q):
+    assert results_intent(q)
+
+
+@pytest.mark.parametrize("q", ["第 2 型糖尿病的第一線用藥", "哪一種抗生素較好", "這幾天發燒怎麼處理", "第一線治療是什麼"])
+def test_results_intent_lets_clinical_through(q):
+    assert not results_intent(q)
+
+
+def _record_route(vt, name):
+    seen = []
+
+    def fake(text, query, ask_back=True):
+        seen.append(text)
+        return lit_base()
+
+    setattr(vt.jobs, name, fake)
+    return seen
+
+
+def test_ask_redirects_to_deck(deck_state):
+    vt = make_tools(deck_state, FakeLLM(answered([card("簡報重點")])))
+    oe = _record_route(vt, "_oe")
+    r = vt.handle(call("ask", question="摘要今天的簡報"))
+    assert r["status"] == "answered" and oe == []
+    assert deck_state.answer.route == "deck"
+
+
+def test_ask_redirects_to_results_when_base(deck_state):
+    deck_state.results_base = lit_base()
+    vt = make_tools(deck_state, FakeLLM({"kind": "answer", "answer_zh": "最新的是第 2 篇（2025）", "refs": [2]}))
+    oe = _record_route(vt, "_oe")
+    assert vt.handle(call("ask", question="哪一篇是最新的")) == {"status": "answered", "message": "已投影"}
+    assert oe == []
+
+
+def test_ask_results_phrase_without_base_goes_search(deck_state):
+    vt = make_tools(deck_state, FakeLLM(answered([])))
+    oe = _record_route(vt, "_oe")
+    vt.handle(call("ask", question="第 3 篇是哪個期刊"))
+    assert oe == ["第 3 篇是哪個期刊"]
+
+
+def test_explicit_pubmed_not_redirected(deck_state):
+    deck_state.results_base = lit_base()
+    vt = make_tools(deck_state, FakeLLM(answered([])))
+    pm = _record_route(vt, "_pubmed")
+    vt.handle(call("ask", question="第 3 篇是哪個期刊", source="pubmed"))
+    assert pm == ["第 3 篇是哪個期刊"]
+
+
+# ---- 最後審查修正（2026-11-18） ----
+
+@pytest.mark.parametrize("q", ["第 2 型糖尿病哪一篇指引建議用 metformin", "有沒有哪一篇研究比較 tacrolimus 和 cyclosporine",
+                               "哪篇指引建議先用類固醇"])
+def test_results_intent_lets_which_paper_clinical_through(q):
+    assert not results_intent(q)
+
+
+@pytest.mark.parametrize("q", ["哪一篇最新", "哪篇是最早的", "上面哪一篇樣本最大"])
+def test_results_intent_which_paper_with_anchor(q):
+    assert results_intent(q)
+
+
+def test_read_answer_reads_results_card_while_oe_deck_plays(deck_state):
+    base = lit_base()
+    base.oe_deck = str(deck_state.deck.path)
+    deck_state.answer = base
+    deck_state.results_base = base
+    deck_state.temp_kind = "oe"
+    deck_state.summary_path = deck_state.deck.path  # OE 簡報播放中
+    vt = make_tools(deck_state, FakeLLM({"kind": "answer", "answer_zh": "最新的是第 2 篇（2025）", "refs": [2]}))
+    assert vt.handle(call("ask_results", question="哪一篇最新"))["status"] == "answered"
+    assert vt.handle(call("read_answer"))["message"] == "最新的是第 2 篇（2025）"
+
+
+# ---- 推導說明不投影、不念（2026-11-18 摘要品質） ----
+
+def test_read_answer_skips_derivation_notes(deck_state):
+    llm = FakeLLM({**answered([card("CNI 一線")]), "derivation_notes": ["此問題不涉及數值規則，因此沒有進行推導"]})
+    vt = make_tools(deck_state, llm)
+    vt.handle(call("ask", question="SRNS 一線？", source="deck"))
+    msg = vt.handle(call("read_answer"))["message"]
+    assert "CNI 一線" in msg and "沒有進行推導" not in msg
+
+
+def test_display_does_not_render_derivation_notes():
+    from xiaoshen.config import REPO_ROOT
+    assert "derivation_notes" not in (REPO_ROOT / "web" / "display.js").read_text(encoding="utf-8")
+    assert "derivation_notes" in (REPO_ROOT / "web" / "host.js").read_text(encoding="utf-8")  # 主持人保留
+
+
+# ---- 語音「摘要第 N 篇」：一次 1 篇，做成簡報（2026-11-18 摘要品質） ----
+
+from xiaoshen.source_text import SourceDoc  # noqa: E402
+from xiaoshen.voice_tools import paper_numbers, summary_intent  # noqa: E402
+
+SUM_Q = "Glucocorticoids are the first-line treatment for children with nephrotic syndrome in most cases."
+SUM_LLM = {"doc_type": "study", "slides": [{"title": "結果", "points": [
+    {"zh": "類固醇為第一線", "quotes": [SUM_Q], "page": 1}]}]}
+
+
+class PaperViewer:
+    def __init__(self):
+        self.asked = []
+
+    def full_doc(self, ref, citation=""):
+        self.asked.append(ref["index"])
+        return SourceDoc(ref["title"], citation, [f"Intro. {SUM_Q} More."], paged=True, full_text=True, origin="pmc")
+
+    def abstract_doc(self, ref, citation=""):
+        raise AssertionError("not expected")
+
+
+def paper_base():
+    refs = {14: {"index": 14, "title": "P14", "first_author": "Wang", "journal": "JAMA Pediatr", "year": "2025"},
+            15: {"index": 15, "title": "P15", "first_author": "Basu", "journal": "JAMA Pediatr", "year": "2018"}}
+    return Answer("oe1", "SRNS？", "openevidence", "answered", references=refs)
+
+
+def paper_tools(st):
+    st.results_base = paper_base()
+    vt = make_tools(st, FakeLLM(SUM_LLM))
+    vt.viewer = PaperViewer()
+    return vt
+
+
+def test_summarize_one_paper(deck_state):
+    vt = paper_tools(deck_state)
+    r = vt.handle(call("summarize_papers", numbers=[14]))
+    # 2026-11-19：立刻回答、背景整理，好了自動播放（語音不用乾等）
+    assert r == {"status": "started", "message": "開始整理第 14 篇，好了會自動播放"}
+    vt.jobs.wait_idle()
+    assert vt.viewer.asked == [14] and deck_state.presenting
+
+
+def test_summarize_two_papers_does_first_and_says_next(deck_state):
+    vt = paper_tools(deck_state)
+    r = vt.handle(call("summarize_papers", numbers=[14, 15]))
+    assert r["message"] == "一次只整理一篇：先整理第 14 篇，好了會自動播放；第 15 篇等這篇好了再跟我說"
+    vt.jobs.wait_idle()
+    assert vt.viewer.asked == [14]
+
+
+def test_summarize_numbers_taken_from_what_user_said(deck_state):
+    # 實機 2026-11-18：說「摘要第 1 篇和第 5 篇」，模型只填了第一篇 → 篇號以使用者的話為準
+    vt = paper_tools(deck_state)
+    vt.hear("摘要第14篇和第15篇")
+    r = vt.handle(call("summarize_papers", numbers=[14]))
+    assert "第 15 篇等這篇好了再跟我說" in r["message"]
+    vt.jobs.wait_idle()
+
+
+def test_summarize_unknown_number(deck_state):
+    vt = paper_tools(deck_state)
+    assert vt.handle(call("summarize_papers", numbers=[99])) == {"status": "not_found", "message": "清單上沒有第 99 篇"}
+
+
+def test_summarize_without_results(deck_state):
+    vt = make_tools(deck_state, FakeLLM(SUM_LLM))
+    vt.viewer = PaperViewer()
+    assert vt.handle(call("summarize_papers", numbers=[14]))["message"] == "目前投影上沒有文獻清單"
+
+
+@pytest.mark.parametrize("q,nums", [("摘要第14篇和第15篇文獻內容", [14, 15]), ("整理第三篇的重點", [3]),
+                                    ("第 14、15 篇的重點", [14, 15])])
+def test_summary_intent_and_numbers(q, nums):
+    assert summary_intent(q) and paper_numbers(q) == nums
+
+
+def test_summary_intent_needs_both_words():
+    assert not summary_intent("第 3 篇是哪個期刊") and not summary_intent("摘要今天的簡報")
+
+
+@pytest.mark.parametrize("tool", ["ask", "ask_results"])
+def test_guard_routes_summary_requests(deck_state, tool):
+    vt = paper_tools(deck_state)
+    r = vt.handle(call(tool, question="摘要第14篇和第15篇文獻內容"))
+    assert r["message"].startswith("一次只整理一篇：先整理第 14 篇")
+    vt.jobs.wait_idle()
+    assert vt.viewer.asked == [14]
+
+
+def test_prompt_mentions_summarize_papers():
+    text = system_instruction()
+    assert "summarize_papers" in text and "立刻照念 message" in text and "自動播放" in text
+
+
+def test_ask_summary_without_results_does_not_search(deck_state):
+    vt = make_tools(deck_state, FakeLLM(SUM_LLM))
+    vt.viewer = PaperViewer()
+    oe = _record_route(vt, "_oe")
+    r = vt.handle(call("ask", question="摘要第14篇和第15篇文獻內容"))
+    assert r["message"] == "目前投影上沒有文獻清單" and oe == []
+
+
+def test_prompt_says_about_me_must_be_spoken():
+    text = system_instruction()
+    assert "about_me 回傳後一定要把 message 完整唸出來" in text

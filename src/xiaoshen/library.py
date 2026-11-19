@@ -60,10 +60,10 @@ class Library:
         self._reported: set = set()
         self._cache: dict[Path, tuple[tuple[int, int], RefDoc]] = {}  # 檔案沒變就不重新抽字
 
-    def refresh(self) -> list[str]:
-        """重新掃描資料夾，回傳給主持人看的警告。"""
+    def refresh(self, convert: bool = True) -> list[str]:
+        """重新掃描資料夾，回傳給主持人看的警告。convert=False：不轉 pptx（開機時用，之後在背景轉）。"""
         warnings: list[str] = []
-        if self.convert is not None:
+        if convert and self.convert is not None:
             report = convert_pending(self.folder, self.convert, self._reported)
             warnings += [f"{name}：轉檔失敗（{err}）" for name, err in report.failed]
         docs: dict[str, RefDoc] = {}

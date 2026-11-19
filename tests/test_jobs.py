@@ -684,6 +684,16 @@ class FakeViewer:
             raise self.exc
         return self.doc
 
+    def current_ref(self):
+        return None
+
+    def full_doc(self, ref, citation=""):
+        return self.read_full()
+
+    def abstract_doc(self, ref, citation=""):
+        return SourceDoc(ref.get("title", ""), citation, [SUM_PAGE], paged=False, full_text=False,
+                         note="只讀到摘要", origin="abstract")
+
 
 def test_summary_job_saves_pdf_and_plays(state):
     r = runner(state, FakeLLM(SUM_RESP))
@@ -819,7 +829,7 @@ def test_summary_renders_in_render_process_when_available(state):
         assert r.wait_summary(r.summarize_source(FakeViewer()), timeout=10)["status"] == "ok"
     finally:
         deckmod.set_renderer(None)
-    assert calls == ["render_summary_pdf"]
+    assert calls == ["render_summary_oe_deck"]  # 2026-11-18：改用 OE 簡報樣式
 
 
 
@@ -989,3 +999,266 @@ def test_superseded_question_skips_oe_deck_build(deck_state):
     jr.wait_idle()
     folder = deck_state.config.folder("紀錄") / "OE簡報"
     assert not folder.exists() or not list(folder.glob("*.pdf"))
+
+
+# ---- 目前的結果（2026-11-18：問已列出的文獻） ----
+
+ABS2 = "This randomized controlled trial enrolled 240 children and compared rituximab with tacrolimus."
+
+
+def lit_answer(route="openevidence"):
+    from xiaoshen.answering import Answer
+    refs = {1: {"index": 1, "title": "P1", "first_author": "Lee", "journal": "Kidney Int", "year": "2019"},
+            2: {"index": 2, "title": "P2", "first_author": "Wang", "journal": "N Engl J Med", "year": "2025"}}
+    return Answer("oe1", "SRNS？", route, "answered", references=refs)
+
+
+def test_search_answer_becomes_results_base(deck_state):
+    jr = runner(deck_state, FakeLLM(answered()))
+    base = lit_answer()
+    jr._oe = lambda text, query, ask_back=True: base
+    job = jr.ask("SRNS 治療？", "openevidence", [])
+    assert jr.wait_answer(job) is base
+    assert deck_state.results_base is base and deck_state.answer is base
+
+
+def test_deck_answer_keeps_results_base(deck_state):
+    base = lit_answer()
+    deck_state.results_base = base
+    jr = runner(deck_state, FakeLLM(answered()))
+    ans = jr.wait_answer(jr.ask("摘要", "deck", []))
+    assert ans.status == "answered" and ans.route == "deck"
+    assert deck_state.results_base is base and deck_state.answer is ans
+
+
+def test_answer_results_without_base(deck_state):
+    jr = runner(deck_state, FakeLLM({"kind": "answer", "answer_zh": "x", "refs": [1]}))
+    assert jr.answer_results("哪篇最新") == {"status": "no_results"}
+
+
+def test_answer_results_commits_card_and_keeps_base(deck_state):
+    base = lit_answer()
+    deck_state.results_base = base
+    llm = FakeLLM({"kind": "answer", "answer_zh": "最新的是第 2 篇（2025）", "refs": [2]})
+    jr = runner(deck_state, llm)
+    r = jr.answer_results("哪篇最新")
+    assert r["status"] == "answered" and r["answer"] is deck_state.answer
+    assert deck_state.answer.cards[0].refs == [2]
+    assert deck_state.results_base is base and deck_state.drawer == "answer"
+    assert llm.calls[0]["model"] == deck_state.config.model_results
+
+
+def test_answer_results_needs_reading(deck_state):
+    deck_state.results_base = lit_answer()
+    jr = runner(deck_state, FakeLLM({"kind": "needs_reading", "answer_zh": "", "refs": []}))
+    assert jr.answer_results("哪幾篇是 RCT") == {"status": "needs_reading"}
+    assert deck_state.answer is None
+
+
+def test_answer_results_phi_not_sent(deck_state):
+    deck_state.results_base = lit_answer()
+    llm = FakeLLM({"kind": "answer", "answer_zh": "x", "refs": [1]})
+    jr = runner(deck_state, llm)
+    assert jr.answer_results("A123456789 這床的病人那篇呢")["status"] == "blocked"
+    assert llm.calls == []
+
+
+def test_read_results_job_commits(deck_state):
+    from xiaoshen.answering import citation_label
+    base = lit_answer()
+    deck_state.results_base = base
+    llm = FakeLLM({"status": "answered", "summary_zh": "", "clarify_zh": "",
+                   "cards": [{"point_zh": "第 2 篇是 RCT", "quote": "This randomized controlled trial enrolled 240",
+                              "source_label": citation_label(base.references[2]), "page": 1}]})
+    jr = runner(deck_state, llm)
+    job = jr.read_results("哪幾篇是 RCT", lambda r: (ABS2, r["title"]))
+    ans = jr.wait_answer(job)
+    assert ans.status == "answered" and ans.cards[0].refs == [2]
+    assert deck_state.answer is ans and deck_state.results_base is base
+
+
+def test_read_results_without_base(deck_state):
+    jr = runner(deck_state, FakeLLM(answered()))
+    assert jr.read_results("q", lambda r: ("", "")) == ""
+
+
+# ---- 2026-11-18 摘要品質：全文來源、OE 整理、OE 簡報樣式 ----
+
+import pymupdf  # noqa: E402
+
+from xiaoshen.answering import Answer  # noqa: E402
+from xiaoshen.fulltext import NeedsFallback  # noqa: E402
+from xiaoshen.oe_client import OEResult  # noqa: E402
+
+PAPER = {"index": 14, "title": "Tacrolimus or MMF for FRNS", "first_author": "Wang", "journal": "JAMA Pediatr",
+         "year": "2025", "doi": "10.1001/x", "pmid": "1"}
+SUM_RESP2 = {"doc_type": "study", "slides": [{"title": "結果", "points": [{"zh": "類固醇為第一線", "quotes": [SUM_P],
+                                                                         "page": 1}]}]}
+
+
+class NoFullTextViewer(FakeViewer):
+    def current_ref(self):
+        return PAPER
+
+    def read_full(self):
+        raise NeedsFallback(PAPER)
+
+    def full_doc(self, ref, citation=""):
+        raise NeedsFallback(ref)
+
+
+def _cover(path):
+    return pymupdf.open(path)[0].get_text()
+
+
+def test_summary_uses_full_text_and_oe_layout(state):
+    doc = SourceDoc("KDIGO 2025", "[4] KDIGO", [SUM_PAGE], paged=True, full_text=True, origin="pmc")
+    r = runner(state, FakeLLM(SUM_RESP2))
+    res = r.wait_summary(r.summarize_source(FakeViewer(doc=doc)), timeout=10)
+    assert res["status"] == "ok" and res["origin"] == "pmc"
+    assert "PubMed Central 全文" in _cover(res["path"]) and "問題：" not in _cover(res["path"])
+
+
+def test_summary_falls_back_to_oe(state):
+    r = runner(state, FakeLLM(SUM_RESP2))
+    asked = []
+
+    def oe(text, query, ask_back=True, timeout=None):
+        asked.append(query)
+        raw = "## 研究設計\n- 隨機對照試驗，240 名兒童 [1]"
+        return Answer("o1", text, "openevidence", "answered",
+                      oe=OEResult(article_id="a", answer=raw, raw=raw, citations=[{**PAPER, "index": 1}]))
+
+    r._oe = oe
+    res = r.wait_summary(r.summarize_source(NoFullTextViewer()), timeout=10)
+    assert res["status"] == "ok" and res["origin"] == "oe"
+    assert "由 OpenEvidence 整理，未逐句核對原文" in _cover(res["path"])
+    assert "Tacrolimus or MMF for FRNS" in asked[0] and "doi:10.1001/x" in asked[0]
+
+
+def test_summary_oe_blocked_falls_back_to_abstract(state):
+    r = runner(state, FakeLLM(SUM_RESP2))
+    r._oe = lambda text, query, ask_back=True, timeout=None: Answer("o1", text, "openevidence", "error", error="OpenEvidence 擋下")
+    res = r.wait_summary(r.summarize_source(NoFullTextViewer()), timeout=10)
+    assert res["status"] == "ok" and res["origin"] == "abstract"
+    assert "只讀到摘要" in _cover(res["path"])
+
+
+def test_summarize_paper_plays_deck(state):
+    doc = SourceDoc(PAPER["title"], "[14] Wang 2025", [SUM_PAGE], paged=True, full_text=True, origin="openalex")
+    r = runner(state, FakeLLM(SUM_RESP2))
+    res = r.wait_summary(r.summarize_paper(PAPER, FakeViewer(doc=doc)), timeout=10)
+    assert res["status"] == "ok" and res["origin"] == "openalex"
+    assert state.presenting and state.summary_path == Path(res["path"])
+
+
+def test_oe_paper_fallback_has_bounded_timeout(state):
+    r = runner(state, FakeLLM(SUM_RESP2))
+    seen = {}
+
+    def oe(text, query, ask_back=True, timeout=None):
+        seen["timeout"] = timeout
+        return Answer("o1", text, "openevidence", "error", error="逾時")
+
+    r._oe = oe
+    res = r.wait_summary(r.summarize_source(NoFullTextViewer()), timeout=10)
+    assert res["origin"] == "abstract" and seen["timeout"] is not None and 0 < seen["timeout"] <= 60
+
+
+def test_oe_answer_about_other_paper_falls_back_to_abstract(state):
+    r = runner(state, FakeLLM(SUM_RESP2))
+    raw = "## 結果\n- 別篇的內容 [1]"
+    other = {"index": 1, "title": "A different trial of cyclophosphamide", "doi": "10.9/other"}
+    r._oe = lambda text, query, ask_back=True, timeout=None: Answer(
+        "o1", text, "openevidence", "answered", oe=OEResult(article_id="a", answer=raw, raw=raw, citations=[other]))
+    res = r.wait_summary(r.summarize_source(NoFullTextViewer()), timeout=10)
+    assert res["status"] == "ok" and res["origin"] == "abstract"
+
+
+def test_oe_not_asked_without_title_or_doi(state):
+    r = runner(state, FakeLLM(SUM_RESP2))
+    asked = []
+    r._oe = lambda *a, **k: asked.append(a) or Answer("o1", "q", "openevidence", "error")
+
+    class Bare(NoFullTextViewer):
+        def read_full(self):
+            raise NeedsFallback({"index": 3, "title": "", "doi": "", "abstract": "x"})
+
+    r.wait_summary(r.summarize_source(Bare()), timeout=10)
+    assert asked == []
+
+
+# ---- 同一篇做過就直接重播（2026-11-19） ----
+
+def _full(origin="pmc"):
+    return SourceDoc(PAPER["title"], "[14] Wang 2025", [SUM_PAGE], paged=True, full_text=True, origin=origin)
+
+
+def test_summary_reused_for_same_paper(state):
+    llm = FakeLLM(SUM_RESP2)
+    r = runner(state, llm)
+    first = r.wait_summary(r.summarize_paper(PAPER, FakeViewer(doc=_full())), timeout=10)
+    state.stop_presenting()
+    second = r.wait_summary(r.summarize_paper(PAPER, FakeViewer(doc=_full())), timeout=10)
+    assert len(llm.calls) == 1 and second["cached"] is True and second["path"] == first["path"]
+    assert state.presenting and state.summary_path == Path(first["path"])
+
+
+def test_abstract_summary_not_reused(state):
+    llm = FakeLLM(SUM_RESP2)
+    r = runner(state, llm)
+    r._oe = lambda text, query, ask_back=True, timeout=None: Answer("o1", text, "openevidence", "error")
+    r.wait_summary(r.summarize_paper(PAPER, NoFullTextViewer()), timeout=10)
+    res = r.wait_summary(r.summarize_paper(PAPER, NoFullTextViewer()), timeout=10)
+    assert len(llm.calls) == 2 and not res.get("cached")
+
+
+def test_cached_summary_redone_when_library_pdf_added(state, make_pdf):
+    llm = FakeLLM(SUM_RESP2)
+    r = runner(state, llm)
+    r.wait_summary(r.summarize_paper(PAPER, FakeViewer(doc=_full("openalex"))), timeout=10)
+    make_pdf([f"Trial report\ndoi: {PAPER['doi']}"], folder=state.config.folder("參考資料"), name="wang.pdf")
+    r.library.refresh()
+    res = r.wait_summary(r.summarize_paper(PAPER, FakeViewer(doc=_full("pdf"))), timeout=10)
+    assert len(llm.calls) == 2 and not res.get("cached")
+
+
+def test_cache_ignores_deleted_deck(state):
+    llm = FakeLLM(SUM_RESP2)
+    r = runner(state, llm)
+    first = r.wait_summary(r.summarize_paper(PAPER, FakeViewer(doc=_full())), timeout=10)
+    state.stop_presenting()
+    Path(first["path"]).unlink()
+    res = r.wait_summary(r.summarize_paper(PAPER, FakeViewer(doc=_full())), timeout=10)
+    assert len(llm.calls) == 2 and not res.get("cached")
+
+
+# ---- 2026-11-19：回答一出來就自動存成字卡 PNG（紀錄\字卡），不再有「整理成字卡」按鈕 ----
+
+def test_answer_auto_saved_as_card_png(deck_state):
+    jr = runner(deck_state, FakeLLM(answered()))
+    ans = jr.wait_answer(jr.ask("SRNS 一線？", "deck", []))
+    jr.wait_idle()
+    saved = deck_state.config.folder("紀錄") / "字卡" / ans.card_file
+    assert ans.card_file and saved.exists() and saved.read_bytes()[:4] == b"\x89PNG" and "SRNS" in ans.card_file
+    assert deck_state.snapshot("host")["ai_answer"]["card_file"] == ans.card_file
+
+
+def test_not_found_answer_not_saved(deck_state):
+    jr = runner(deck_state, FakeLLM({"status": "not_found", "summary_zh": "", "clarify_zh": "", "cards": []}))
+    jr._oe = lambda text, query, ask_back=True, timeout=None: Answer("o", text, "openevidence", "not_found")
+    jr._pubmed = lambda text, query: Answer("p", text, "pubmed", "not_found")
+    jr._fallback_to_model = lambda job_id, text, ans, tried: ans
+    ans = jr.wait_answer(jr.ask("q", "deck", []))
+    jr.wait_idle()
+    assert ans.card_file == "" and not (deck_state.config.folder("紀錄") / "字卡").exists()
+
+
+def test_oe_deck_answer_not_saved_as_card(deck_state):
+    jr = runner(deck_state, FakeLLM(answered()))
+    oe_ans = lit_answer()
+    oe_ans.oe_deck = "x.pdf"
+    jr._oe = lambda text, query, ask_back=True, timeout=None: oe_ans
+    jr.wait_answer(jr.ask("q", "openevidence", []))
+    jr.wait_idle()
+    assert oe_ans.card_file == ""

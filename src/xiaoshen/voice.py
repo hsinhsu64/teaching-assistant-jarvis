@@ -65,6 +65,10 @@ class VoiceSession:
         self._wake_requested = False
         self._stop_requested = False
         self._mute_reply = False           # 只翻頁成功時，這一輪的回話不播（翻頁不出聲）
+        # 回話裡唸到自己的名字（喚醒詞）時，喇叭的聲音會被本機喚醒詞聽到而自己打斷自己（實機 2026-11-19）：
+        # 這段話播完之前不因喚醒詞中斷
+        self._said_name = False
+        self._turn_output = ""
         self._turn_tools: set[str] = set() # 這一輪呼叫過的工具：有翻頁以外的就不靜音
         self._window_until = 0.0          # 這個時間前要開始說（問題或追問），否則回待命
         self._in_turn = False              # 使用者已開始說這一題
@@ -157,12 +161,13 @@ class VoiceSession:
         playing = self.speaker.is_playing()
         status = self._status()
         if status == "speaking" and not playing:
+            self._said_name = False  # 播完了：恢復可用喚醒詞插話
             self._set_status("listening")
             self._open_window(self.followup_seconds)
             status = "listening"
         if status == "speaking":
             # 說話中麥克風不送雲端，但本機繼續聽喚醒詞：聽到就中斷
-            if self.detector.wake_label in self.detector.feed(to_float(block)):
+            if self.detector.wake_label in self.detector.feed(to_float(block)) and not self._said_name:
                 self._barge_in()
             return
         if status == "listening" and not self._in_turn and self._heard_speech(block):
@@ -290,6 +295,10 @@ class VoiceSession:
                 self.state.voice_phi_alert = True
                 self.state._changed()
         elif ev.kind == "output_text":
+            self._turn_output += to_traditional(ev.text)
+            label = getattr(self.detector, "wake_label", "")
+            if label and label in self._turn_output:
+                self._said_name = True
             if not self._mute_reply:
                 self.state.add_transcript(persona.current().display_name, ev.text)
         elif ev.kind == "tool_call":
@@ -301,9 +310,12 @@ class VoiceSession:
             self._tool_task = asyncio.create_task(self._run_tools(live, ev.calls, sid))
         elif ev.kind == "interrupted":
             self._mute_reply = False
+            self._said_name = False
+            self._turn_output = ""
             self._turn_tools = set()
             self.speaker.stop()
         elif ev.kind == "turn_complete":
+            self._turn_output = ""  # _said_name 留到這段話播完
             self._mute_reply = False
             self._turn_tools = set()
             self.state.end_transcript_turn()

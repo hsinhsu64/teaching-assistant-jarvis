@@ -21,12 +21,48 @@ async function loadDecks(currentName) {
   deckListLoaded = true;
 }
 
+// 開機自我檢查（左欄最上面，和「設定與工具」一樣用箭頭收合）：結果一出來先全部列出，
+// 綠燈 5 秒後收起，收起時只留黃燈、紅燈、確認中與警告；按箭頭可再看全部項目。
+// 之後才變綠的（重新檢查、手機確認成功）也是 5 秒後收起；綠燈又出問題就重新出現。
+const GREEN_LINGER_MS = 5000;
+const greenSince = new Map();  // 項目名稱 → 這次開始是綠燈的時間
+let checksShowAll = false;
+let checksTimer = null;
+
 function renderChecks(s) {
-  $("checks").innerHTML = s.checks.length
-    ? s.checks.map((c) => `<li class="lv-${c.level}"><b>${esc(c.name)}</b>：${esc(c.detail)}${
-        c.name === "OpenEvidence" && c.level !== "ok" ? ` <button class="secondary" data-recheck="oe">重新檢查</button>` : ""}</li>`).join("")
-    : `<li class="muted">尚無結果</li>`;
+  const now = Date.now();
+  for (const c of s.checks) {
+    if (c.level !== "ok") greenSince.delete(c.name);
+    else if (!greenSince.has(c.name)) greenSince.set(c.name, now);
+  }
+  const lingering = (c) => c.level === "ok" && now - greenSince.get(c.name) < GREEN_LINGER_MS;
+  const rows = checksShowAll ? s.checks : s.checks.filter((c) => c.level !== "ok" || lingering(c));
+  $("checks").innerHTML = rows.map((c) => `<li class="lv-${c.level}"><b>${esc(c.name)}</b>：${esc(c.detail)}${
+      c.name === "OpenEvidence" && c.level !== "ok" ? ` <button class="secondary" data-recheck="oe">重新檢查</button>` : ""}${
+      c.hint && c.level !== "ok" ? `<div class="hint"><b>怎麼修：</b>${esc(c.hint)}</div>` : ""}</li>`).join("");
   $("warnings").innerHTML = s.warnings.map((w) => `<li>${esc(w)}</li>`).join("");
+  const folded = s.checks.length - rows.length;
+  $("checksFoldStatus").dataset.folded = folded ? `（綠燈 ${folded} 項已收起，按箭頭看全部）` : "";
+  // 下一個綠燈滿 5 秒時再畫一次
+  clearTimeout(checksTimer);
+  const waits = s.checks.filter(lingering).map((c) => greenSince.get(c.name) + GREEN_LINGER_MS - now);
+  if (waits.length) checksTimer = setTimeout(() => { if (snap) renderChecks(snap); }, Math.min(...waits) + 50);
+  renderChecksSummary(s);
+}
+
+function renderChecksSummary(s) {
+  const count = (lv) => s.checks.filter((c) => c.level === lv).length;
+  const fail = count("fail"), warn = count("warn"), pending = count("pending"), notes = s.warnings.length;
+  const parts = [fail && `${fail} 項紅燈`, warn && `${warn} 項黃燈`, notes && `${notes} 則警告`,
+    pending && `確認中 ${pending} 項`].filter(Boolean);
+  const level = fail ? "fail" : warn || notes ? "warn" : pending || !s.checks.length ? "pending" : "ok";
+  $("checksToggle").dataset.level = level;
+  const text = !s.checks.length ? "尚無結果" : parts.length ? parts.join("、") : "全部正常";
+  $("checksSummary").textContent = "自我檢查：" + text;
+  $("secChecks").dataset.level = level;
+  $("checksFoldStatus").textContent = `· ${text}${checksShowAll ? "" : $("checksFoldStatus").dataset.folded || ""}`;
+  $("checksFold").setAttribute("aria-expanded", checksShowAll ? "true" : "false");
+  $("checksFold").querySelector(".caret").textContent = checksShowAll ? "▼" : "▶";
 }
 
 // 投影幕狀態（§6.0）：「播放簡報」一直顯示，播下拉選單選的那份；播放中要先回到主畫面（2026-11-08）
@@ -34,12 +70,15 @@ function renderPresent(s) {
   $("presentMode").textContent = s.presenting ? "投影幕：播放中" : "投影幕：主畫面";
   $("presentStop").disabled = !s.presenting;
   $("present").style.display = "";
-  $("present").disabled = !s.deck || !!s.presenting;
+  $("present").disabled = (!s.deck && !s.deck_converting) || !!s.presenting;
   $("present").title = s.presenting ? "播放中請先回到主畫面" : "";
   $("decks").disabled = !!s.presenting;
   $("decks").title = s.presenting ? "播放中請先回到主畫面" : "";
   const c = s.deck_candidates || [];
   $("deckCands").textContent = c.length ? `語音找到幾份簡報：${c.join("、")}（請說出是哪一份）` : "";
+  const conv = s.deck_converting;
+  $("deckConv").textContent = conv
+    ? `「${conv.name}」要先轉成 PDF，需要一段時間，好了會自動${conv.play ? "播放" : "打開"}…` : "";
 }
 
 function renderDeck(s) {
@@ -64,25 +103,46 @@ function renderDeck(s) {
   }
 }
 
-function renderPhone(s) {
-  $("phone").innerHTML = s.phone_url
-    ? `<img src="/qr.png?u=${encodeURIComponent(s.phone_url)}" alt="QR"><span>${esc(s.phone_url)}</span>`
-    : `通道尚未就緒（手機暫時無法作答）`;
-  $("phone").classList.toggle("muted", !s.phone_url);
+// 主持人手機連線（§6.3b，2026-11-19 搬到頂端）：同一顆按鈕切換。按一下產生一次性 QR Code、按鈕變「收回 QR Code」；
+// 再按一下收回 QR Code（不作廢：2 分鐘內仍可掃）、按鈕恢復「主持人手機連線」。
+// 連上的手機一直有效到程式結束；再產生 QR Code 讓另一支手機掃，舊的那支自動換掉。
+let hostPaired = null;
+let hostPhoneMsgTimer = null;
+
+function qrShown() {
+  return $("hostPhoneQr").style.display === "block";
+}
+
+function syncHostPhonePanel() {
+  $("hostPhonePanel").classList.toggle("show", qrShown() || !!$("hostPhoneMsg").textContent);
+  $("hostPhonePair").textContent = qrShown() ? "收回 QR Code" : "主持人手機連線";
+  $("hostPhonePair").setAttribute("aria-pressed", qrShown() ? "true" : "false");
+}
+
+// 訊息；brief：幾秒後自己消失（例如「已過期」「已連上」），面板跟著收起
+function setHostPhoneMsg(text, brief = false) {
+  clearTimeout(hostPhoneMsgTimer);
+  $("hostPhoneMsg").textContent = text;
+  if (brief && text) hostPhoneMsgTimer = setTimeout(() => setHostPhoneMsg(""), 6000);
+  syncHostPhonePanel();
 }
 
 function hideHostPhoneQr() {
   clearTimeout(hostPhoneTimer);
   $("hostPhoneQr").style.display = "none";
   $("hostPhoneQr").removeAttribute("src");
+  syncHostPhonePanel();
 }
 
 function renderHostPhone(s) {
   const paired = !!(s.host_phone && s.host_phone.paired);
-  if (paired && !$("hostPhoneRevoke").style.display) return;  // 狀態沒變，不動（QR Code 可能正在顯示）
-  $("hostPhoneRevoke").style.display = paired ? "" : "none";
-  $("hostPhoneStatus").textContent = paired ? "已連接一支主持人手機" : "尚未連接";
-  if (paired) { hideHostPhoneQr(); $("hostPhoneMsg").textContent = ""; }
+  if (paired === hostPaired) return;  // 狀態沒變，不動（QR Code 可能正在顯示）
+  const justPaired = hostPaired === false && paired;
+  hostPaired = paired;
+  if (justPaired) {  // 手機剛掃好：QR Code 已用掉，收起來
+    hideHostPhoneQr();
+    setHostPhoneMsg("主持人手機已連上（到程式結束都有效）", true);
+  }
 }
 
 function renderRun(s) {
@@ -110,11 +170,15 @@ const ROUTE_LABEL = { openevidence: "OpenEvidence", pubmed: "PubMed", model: "Ge
   references: "參考資料", deck: "今天的簡報", page: "目前這一頁" };
 
 async function loadReferences() {
-  const sel = $("route");
-  const keep = sel.value;
   let refs = [];
   try { refs = await (await fetch("/api/references")).json(); } catch (e) { /* AI 未啟用 */ }
   if (!Array.isArray(refs)) refs = [];
+  fillRoute($("route"), refs, "openevidence");
+  fillRoute($("quizRoute"), refs, "deck");  // 出題通常出自今天的簡報
+}
+
+function fillRoute(sel, refs, initial) {
+  const keep = sel.value || initial;
   sel.innerHTML = [
     `<option value="openevidence">搜尋（OpenEvidence，查不到再查 PubMed）</option>`,
     `<option value="pubmed">搜尋（PubMed）</option>`,
@@ -126,8 +190,8 @@ async function loadReferences() {
   if ([...sel.options].some((o) => o.value === keep)) sel.value = keep;
 }
 
-function routeBody() {
-  const v = $("route").value || "deck";
+function routeBody(selId = "route") {
+  const v = $(selId).value || "deck";
   if (v.startsWith("references:")) {
     const name = v.slice("references:".length);
     return { route: "references", refs: name ? [name] : [] };
@@ -135,12 +199,12 @@ function routeBody() {
   return { route: v, refs: [] };
 }
 
-async function send(url, body) {
-  $("phi").textContent = "";
+async function send(url, body, phiId = "phi") {
+  $(phiId).textContent = "";
   const res = await postJSON(url, body);
   const data = await res.json().catch(() => ({}));
   if (!res.ok) { alert(data.detail || "送出失敗"); return; }
-  if (data.sent === false) $("phi").textContent = "疑似含病人識別資訊，未送出：" + (data.phi || []).join("、");
+  if (data.sent === false) $(phiId).textContent = "疑似含病人識別資訊，未送出：" + (data.phi || []).join("、");
 }
 
 function ask() {
@@ -150,7 +214,7 @@ function ask() {
 
 function generate() {
   const n = Number($("qn").value) || 5;
-  send("/api/quiz/generate", { n, focus: $("askText").value.trim(), ...routeBody() });
+  send("/api/quiz/generate", { n, focus: $("quizFocus").value.trim(), ...routeBody("quizRoute") }, "quizPhi");
 }
 
 function elapsed(job) {
@@ -160,43 +224,74 @@ function elapsed(job) {
 function renderJobs(s) {
   const parts = [];
   if (s.answer_job) parts.push(`${s.answer_job.kind === "summary" ? "整理重點中" : "查詢中"}…（${esc(s.answer_job.label)}，已 ${elapsed(s.answer_job)} 秒）`);
-  if (s.quiz_job) parts.push(`出題中…（${esc(s.quiz_job.label)}，已 ${elapsed(s.quiz_job)} 秒）`);
   if (s.summary_note && !s.answer_job) parts.push(`<span class="err">${esc(s.summary_note)}</span>`);
   $("jobs").innerHTML = parts.map((p) => `<div class="job">${p}</div>`).join("");
+  $("quizJobs").innerHTML = s.quiz_job
+    ? `<div class="job">出題中…（${esc(s.quiz_job.label)}，已 ${elapsed(s.quiz_job)} 秒）</div>` : "";
   if (s.phi_hits && s.phi_hits.length) $("phi").textContent = "疑似含病人識別資訊，未送出：" + s.phi_hits.join("、");
 }
 
+// 回答區工具列：依當下狀況決定每顆按鈕能不能按（白色＝能按，灰色＝不能按）。
+// OE 回答（§6.2c）的播放／收回 OE 簡報也放在這排：第一組按鈕換成 OE 的用法。
+function renderAnswerTools(s) {
+  const a = s.ai_answer;
+  const answered = !!(a && a.status === "answered");
+  const oe = answered && !!a.oe_deck && !s.answer_job;  // 查詢新問題時，第一組回到「投影／收起回答」
+  $("showAns").dataset.oe = oe ? "1" : "";
+  if (oe) {
+    const p = a.oe_deck.play;
+    $("showAns").textContent = p === "oe_ended" ? "再播一次 OE 簡報" : "播放 OE 簡報";
+    // 派題中先等；收題後不會自己播，要按這顆（或用語音）
+    $("showAns").disabled = p === "oe_playing" || (p === "oe_waiting_quiz" && !!(s.run && s.run.status === "open"));
+    $("hideAns").textContent = "收回 OE 簡報";
+    $("hideAns").disabled = p !== "oe_playing";
+  } else {
+    $("showAns").textContent = "投影回答";
+    $("showAns").disabled = !a || s.drawer === "answer" || (s.run && s.run.status === "open");
+    $("hideAns").textContent = "收起回答";
+    $("hideAns").disabled = !["answer", "working"].includes(s.drawer);
+  }
+  // 回答一出來就自動存成字卡 PNG（2026-11-19）
+  $("cardMsg").textContent = answered && a.card_file ? `已存：紀錄\\字卡\\${a.card_file}` : "";
+  // 原文引句：只有一般回答有；已經打開的話一定能按（才關得掉）
+  $("quotes").textContent = s.show_quotes ? "投影隱藏原文" : "投影顯示原文";
+  $("quotes").disabled = !s.show_quotes && !(answered && !a.oe_deck && a.cards.some((c) => c.quote));
+  // 「關閉原文」固定在工具列（不在會整個重畫的回答區裡）
+  $("sourceClose").disabled = !s.source_view;
+  $("sourceClose").textContent = s.source_view ? `關閉原文（投影上：第 ${s.source_view.card} 張）` : "關閉原文";
+  // 原文重點摘要簡報（§6.2b）：有原文畫面才能整理；整理中同一顆變成「取消整理」
+  const summarizing = !!(s.answer_job && s.answer_job.kind === "summary");
+  $("summaryStart").dataset.cancel = summarizing ? "1" : "";
+  $("summaryStart").textContent = summarizing ? "取消整理" : "整理重點";
+  $("summaryStart").disabled = !summarizing && !(s.source_view && !s.answer_job);  // 查詢或整理中不能開始（審查 #3）
+}
+
+let lastAnswerId = null;
+
 function renderAnswer(s) {
   const a = s.ai_answer;
-  $("quotes").textContent = s.show_quotes ? "投影隱藏原文" : "投影顯示原文";
-  $("showAns").disabled = !a || s.drawer === "answer" || (s.run && s.run.status === "open");
-  $("hideAns").disabled = !["answer", "working"].includes(s.drawer);
-  $("makeCard").disabled = !(a && a.status === "answered" && a.cards.length);
-  $("hideCard").disabled = !s.card;
-  // 手機（§6.3a）：投影控制（預設開）與搜尋網路（預設關）兩個開關
-  $("phoneToggle").textContent = s.phone_control_enabled === false ? "手機投影控制：暫停" : "手機投影控制：開";
-  $("phoneToggle").dataset.on = s.phone_control_enabled === false ? "" : "1";
-  $("searchToggle").textContent = s.phone_search_enabled ? "手機搜尋網路：開" : "手機搜尋網路：關";
+  renderAnswerTools(s);
+  const id = a ? a.id : null;
+  if (id !== lastAnswerId) {  // 換了一個回答：上一個回答的字卡／原文訊息不再適用
+    if (lastAnswerId !== null) { $("sourceMsg").textContent = ""; }
+    lastAnswerId = id;
+  }
+  // 手機（§6.3a）：投影控制與搜尋文獻兩個開關（2026-11-18 起都預設關）
+  $("phoneToggle").textContent = s.phone_control_enabled ? "手機投影控制：開" : "手機投影控制：關";
+  $("phoneToggle").dataset.on = s.phone_control_enabled ? "1" : "";
+  $("searchToggle").textContent = s.phone_search_enabled ? "手機搜尋文獻：開" : "手機搜尋文獻：關";
   $("searchToggle").dataset.on = s.phone_search_enabled ? "1" : "";
   renderTeacher(s);
-  // 「關閉原文」固定在工具列（不在會整個重畫的回答區裡）
-  $("sourceClose").style.display = s.source_view ? "" : "none";
-  $("sourceClose").textContent = s.source_view ? `關閉原文（投影上：第 ${s.source_view.card} 張）` : "關閉原文";
-  // 原文重點摘要簡報（§6.2b）：有原文畫面才能整理；整理中可取消
-  const summarizing = s.answer_job && s.answer_job.kind === "summary";
-  $("summaryStart").style.display = s.source_view && !s.answer_job ? "" : "none";  // 查詢或整理中不能開始（審查 #3）
-  $("summaryCancel").style.display = summarizing ? "" : "none";
   if (!a) { $("answer").innerHTML = `<p class="muted">尚未發問</p>`; return; }
   let html = `<p class="muted">${esc(ROUTE_LABEL[a.route] || "")}：${esc(a.question)}</p>`;
   if (a.interpreted) html += `<p class="muted">${esc(appName())}理解為：${esc(a.interpreted)}</p>`;
   if (a.fallback_note) html += `<p class="muted">${esc(a.fallback_note)}</p>`;
   if (a.status === "answered" && a.oe_deck) {
-    // OE 簡報（§6.2c）：OpenEvidence 結果完整照原文做成簡報；參考文獻在投影幕上點
+    // OE 簡報（§6.2c）：OpenEvidence 結果完整照原文做成簡報；參考文獻在投影幕上點。
+    // 播放／收回在上方工具列，這裡只寫狀態。
     const p = a.oe_deck.play;
     html += `<div class="ans-card"><b>OE 簡報（${a.oe_deck.pages} 頁）</b>：${
-      p === "oe_playing" ? "投影中" : p === "oe_ended" ? "已收回" : p === "oe_waiting_quiz" ? "派題中，收題後再播" : "已做好，尚未播放"}
-      ${p === "oe_playing" ? `<button id="oeStop" class="secondary" data-oestop="1">收回 OE 簡報</button>`
-        : `<button id="oePlay" data-oeplay="1">${p === "oe_ended" ? "再播一次" : "播放 OE 簡報"}</button>`}
+      p === "oe_playing" ? "投影中" : p === "oe_ended" ? "已收回" : p === "oe_waiting_quiz" && s.run && s.run.status === "open" ? "派題中，收題後再播" : "已做好，尚未播放"}
       <div class="src">參考文獻請在投影幕上直接點選</div></div>`;
   } else if (a.status === "answered") {
     // 出處原文按鈕（§6.2a）：文獻 → 摘要／原文網頁；簡報、參考資料 → 那一頁
@@ -238,6 +333,28 @@ function renderDrafts(s) {
       <div class="row"><button class="secondary" data-del="${esc(q.id)}">刪除</button>
         <button class="secondary" data-regen="${esc(q.id)}"${s.quiz_job ? " disabled" : ""}>重出這題</button></div></div>`).join("")
     : `<p class="muted">沒有草稿</p>`;
+}
+
+// 「出題與作答」預設收起：標題列寫目前狀況；有新草稿或新的一題開始作答就自動打開一次，
+// 主持人手動收起後，要到下一批新草稿或下一題開始作答才再打開。
+let seenDraftIds = new Set();
+let seenRunId = null;
+
+function renderQuizFold(s) {
+  const run = s.run;
+  const open = !!(run && run.status === "open");
+  const parts = [];
+  if (s.quiz_job) parts.push("出題中…");
+  if (s.drafts.length) parts.push(`草稿 ${s.drafts.length} 題`);
+  if (run) parts.push(open
+    ? (run.kind === "single" ? `作答中（已作答 ${run.participants}）` : `作答中（已交卷 ${run.submitted}／作答 ${run.participants}）`)
+    : (run.kind === "single" ? "已公布答案" : "已收卷"));
+  $("quizSummary").textContent = parts.length ? "· " + parts.join(" · ") : "";
+  $("quizSummary").classList.toggle("live", open || !!s.quiz_job);
+  const ids = s.drafts.map((q) => q.id);
+  if (ids.some((id) => !seenDraftIds.has(id)) || (open && run.id !== seenRunId)) $("secQuiz").open = true;
+  seenDraftIds = new Set(ids);
+  seenRunId = run ? run.id : null;
 }
 
 // ---- 語音 ----
@@ -321,12 +438,12 @@ function apply(s) {
   keys = s.keys || DEFAULT_KEYS;
   renderChecks(s);
   renderDeck(s);
-  renderPhone(s);
   renderHostPhone(s);
   renderRun(s);
   renderJobs(s);
   renderAnswer(s);
   renderDrafts(s);
+  renderQuizFold(s);
   renderVoice(s);
 }
 
@@ -343,20 +460,21 @@ function connect() {
 }
 
 $("hostPhonePair").onclick = async () => {
-  $("hostPhoneMsg").textContent = "";
+  if (qrShown()) {  // 收回 QR Code：只是收起來，不作廢（2 分鐘內仍可掃）
+    hideHostPhoneQr();
+    setHostPhoneMsg("");
+    return;
+  }
+  setHostPhoneMsg("");
   const res = await postJSON("/api/host-phone/pair");
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) { hideHostPhoneQr(); $("hostPhoneMsg").textContent = data.detail || "無法產生 QR Code"; return; }
+  if (!res.ok) { hideHostPhoneQr(); setHostPhoneMsg(data.detail || "無法產生 QR Code", true); return; }
   $("hostPhoneQr").src = data.qr;
   $("hostPhoneQr").style.display = "block";
-  $("hostPhoneMsg").textContent = `請用手機掃描，${Math.round(data.expires_in / 60)} 分鐘內有效、只能用一次。不要投到投影幕上。`;
+  setHostPhoneMsg(`請用手機掃描，${Math.round(data.expires_in / 60)} 分鐘內有效、只能用一次。不要投到投影幕上。`);
   clearTimeout(hostPhoneTimer);
-  hostPhoneTimer = setTimeout(() => { hideHostPhoneQr(); $("hostPhoneMsg").textContent = "QR Code 已過期，要連接請重按一次"; }, data.expires_in * 1000);
-};
-$("hostPhoneRevoke").onclick = () => {  // 解除時配對碼也一起作廢
-  hideHostPhoneQr();
-  $("hostPhoneMsg").textContent = "";
-  postJSON("/api/host-phone/revoke");
+  hostPhoneTimer = setTimeout(() => { hideHostPhoneQr(); setHostPhoneMsg("QR Code 已過期，要連接請重按一次", true); },
+                              data.expires_in * 1000);
 };
 $("prev").onclick = () => postJSON("/api/nav", { action: "prev" });
 $("next").onclick = () => postJSON("/api/nav", { action: "next" });
@@ -367,7 +485,7 @@ $("hide").onclick = () => postJSON("/api/drawer/hide");
 $("decks").onchange = async (ev) => {
   if (!ev.target.value) return;
   const res = await postJSON("/api/deck", { path: ev.target.value });
-  if (!res.ok) alert("無法開啟這份簡報");
+  if (!res.ok) alert((await res.json().catch(() => ({}))).detail || "無法開啟這份簡報");
 };
 $("presentStop").onclick = () => postJSON("/api/present/stop");
 $("present").onclick = async () => {
@@ -406,19 +524,9 @@ $("ask").onclick = ask;
 $("gen").onclick = generate;
 $("askText").addEventListener("keydown", (ev) => { if (ev.key === "Enter" && ev.ctrlKey) { ev.preventDefault(); ask(); } });
 $("route").onfocus = loadReferences;
-$("showAns").onclick = () => postJSON("/api/answer/show");
-$("hideAns").onclick = () => postJSON("/api/drawer/hide");
-$("makeCard").onclick = async () => {
-  $("cardMsg").textContent = "整理中…";
-  const res = await postJSON("/api/answer/card");
-  const data = await res.json().catch(() => ({}));
-  $("cardMsg").textContent = res.ok ? `已存：紀錄\\字卡\\${data.file}` : (data.detail || "無法整理成字卡");
-};
-$("hideCard").onclick = () => postJSON("/api/answer/card/hide");
-$("answer").addEventListener("click", (ev) => {
-  if (ev.target.closest("button[data-oeplay]")) postJSON("/api/oe/play");
-  if (ev.target.closest("button[data-oestop]")) postJSON("/api/oe/stop");
-});
+$("quizRoute").onfocus = loadReferences;
+$("showAns").onclick = () => postJSON($("showAns").dataset.oe ? "/api/oe/play" : "/api/answer/show");
+$("hideAns").onclick = () => postJSON($("showAns").dataset.oe ? "/api/oe/stop" : "/api/drawer/hide");
 $("answer").onclick = async (ev) => {
   const b = ev.target.closest("button[data-zoom]");
   if (b) postJSON("/api/answer/figure", { index: b.dataset.zoom === "" ? null : Number(b.dataset.zoom) });
@@ -478,6 +586,18 @@ $("checks").addEventListener("click", async (ev) => {
 });
 $("phoneToggle").onclick = () => postJSON("/api/phone/control-enabled", { enabled: !$("phoneToggle").dataset.on });
 $("searchToggle").onclick = () => postJSON("/api/phone/search-enabled", { enabled: !$("searchToggle").dataset.on });
+// 左欄的箭頭：展開／收起全部項目；頂端摘要：展開並捲到左欄的自我檢查
+$("checksFold").onclick = () => { checksShowAll = !checksShowAll; if (snap) renderChecks(snap); };
+$("checksToggle").onclick = () => {
+  checksShowAll = true;
+  if (snap) renderChecks(snap);
+  $("secChecks").scrollIntoView({ behavior: "smooth", block: "start" });
+};
+// 頂端「⚙ 設定」：展開最下面的「設定與工具」並捲過去
+$("toolsToggle").onclick = () => {
+  $("secTools").open = true;
+  $("secTools").scrollIntoView({ behavior: "smooth", block: "start" });
+};
 
 // 手機「詢問老師」：投影（不顯示是誰問的）、用助理查這題、移除；疑似含識別資訊的不能投影
 let teacherKey = "";
@@ -494,7 +614,7 @@ function renderTeacher(s) {
       <div>${esc(q.text)}</div>
       <div class="row" style="margin-top:6px">
         ${q.shown ? `<span class="src">投影中</span> <button class="secondary" data-tq="hide" data-id="${esc(q.id)}">收回</button>`
-                  : `<button class="secondary" data-tq="show" data-id="${esc(q.id)}" ${q.phi ? "disabled" : ""}>顯示在投影幕</button>`}
+                  : `<button data-tq="show" data-id="${esc(q.id)}" ${q.phi ? "disabled" : ""}>顯示在投影幕</button>`}
         <button class="secondary" data-tq="ask" data-id="${esc(q.id)}">用${esc(appName())}查這題</button>
         <button class="secondary" data-tq="remove" data-id="${esc(q.id)}">移除</button>
       </div></div>`).join("") : `<p class="muted">還沒有提問</p>`);
@@ -506,6 +626,7 @@ $("teacherList").addEventListener("click", async (ev) => {
   if (r.ok === false && r.message) $("sourceMsg").textContent = r.message;
 });
 $("summaryStart").onclick = async () => {
+  if ($("summaryStart").dataset.cancel) return postJSON("/api/summary/cancel");
   $("sourceMsg").textContent = "";
   const r = await postJSON("/api/summary/start");
   if (!r.ok) {
@@ -513,7 +634,6 @@ $("summaryStart").onclick = async () => {
     $("sourceMsg").textContent = body.detail || "無法整理原文";
   }
 };
-$("summaryCancel").onclick = () => postJSON("/api/summary/cancel");
 $("sourceClose").onclick = () => { $("sourceMsg").textContent = ""; postJSON("/api/source/close"); };
 $("quotes").onclick = () => postJSON("/api/answer/quotes");
 $("publish").onclick = async () => {
@@ -528,28 +648,41 @@ $("drafts").onclick = (ev) => {
 };
 setInterval(() => { if (snap && (snap.answer_job || snap.quiz_job)) renderJobs(snap); }, 1000);
 
-const drop = $("drop");
-drop.ondragover = (ev) => { ev.preventDefault(); drop.classList.add("over"); };
-drop.ondragleave = () => drop.classList.remove("over");
-drop.ondrop = async (ev) => {
-  ev.preventDefault();
-  drop.classList.remove("over");
-  for (const file of ev.dataTransfer.files) {
-    drop.textContent = `上傳中：${file.name}…`;
-    const fd = new FormData();
-    fd.append("file", file);
-    const res = await fetch("/api/references/upload", { method: "POST", body: fd });
-    const data = await res.json().catch(() => ({}));
-    drop.textContent = res.ok
-      ? `已加入：${data.name}（${data.pages} 頁${data.scanned ? "，掃描檔無法讀取" : ""}）`
-      : `無法加入 ${file.name}：${data.detail || "失敗"}`;
+// ---- 設定：資料夾（2026-11-19）：跳出這台電腦的選資料夾視窗，選已有的或新增；重新啟動後生效 ----
+
+$("setFolderPick").onclick = async () => {
+  const msg = $("folderMsg");
+  msg.className = "src";
+  msg.textContent = "請在這台電腦跳出的視窗裡選資料夾（可按「新增資料夾」建立）…";
+  $("setFolderPick").disabled = true;
+  try {
+    const res = await postJSON("/api/settings/folder");
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      msg.className = "src err";
+      msg.textContent = body.detail || "無法更換資料夾";
+    } else if (body.cancelled) {
+      msg.textContent = "沒有更換";
+    } else {
+      $("setFolder").textContent = body.folder;
+      msg.textContent = body.restart_needed
+        ? "已換好，重新啟動後生效（按「結束程式」再重新啟動）。原本資料夾裡的檔案不會搬，需要的話請自己複製過去。"
+        : "沒有變更（就是目前的資料夾）";
+    }
+  } finally {
+    $("setFolderPick").disabled = false;
   }
-  loadReferences();
 };
 
 // ---- 設定：名字、喚醒詞、科別、會議類型 ----
 
-const SETTING_LABEL = { display_name: "名字", wake_word: "喚醒詞", meeting_type: "會議類型" };
+const SETTING_LABEL = { display_name: "名字", wake_word: "喚醒詞", meeting_type: "會議類型",
+  audio_device: "麥克風", speaker_device: "喇叭", wake_sensitivity: "喚醒靈敏度" };
+
+function fillDeviceSelect(id, options, value) {
+  $(id).innerHTML = options.map((o) => `<option value="${esc(o.value)}">${esc(o.label)}</option>`).join("");
+  $(id).value = value;
+}
 const OTHER = "其它";
 
 function syncMeetingOther() {
@@ -566,6 +699,7 @@ async function loadSettings() {
     const res = await fetch("/api/settings");
     if (!res.ok) return;
     const s = await res.json();
+    $("setFolder").textContent = s.data_root || "（尚未設定）";
     $("setName").value = s.display_name;
     $("setWake").value = s.wake_word;
     $("setSpecialty").value = s.specialty;
@@ -573,6 +707,9 @@ async function loadSettings() {
     $("setMeeting").value = s.meeting_type;
     $("setMeetingOther").value = s.meeting_type_other;
     syncMeetingOther();
+    fillDeviceSelect("setMic", s.mic_options, s.audio_device);
+    fillDeviceSelect("setSpeaker", s.speaker_options, s.speaker_device);
+    fillDeviceSelect("setWakeSens", s.wake_sensitivity_options, s.wake_sensitivity);
   } catch (e) { /* 連線恢復後重新整理頁面即可 */ }
 }
 
@@ -584,6 +721,8 @@ $("settingsSave").onclick = async () => {
     const res = await postJSON("/api/settings", {
       display_name: $("setName").value, wake_word: $("setWake").value, specialty: $("setSpecialty").value,
       meeting_type: $("setMeeting").value, meeting_type_other: $("setMeetingOther").value,
+      audio_device: $("setMic").value, speaker_device: $("setSpeaker").value,
+      wake_sensitivity: $("setWakeSens").value,
     });
     const body = await res.json().catch(() => ({}));
     if (res.status === 422 && body.errors) {
@@ -591,7 +730,9 @@ $("settingsSave").onclick = async () => {
     } else if (!res.ok) {
       settingsMessage("儲存失敗，請再試一次", true);
     } else {
-      settingsMessage(body.restart_needed ? "已儲存。名字與喚醒詞在重新啟動後生效。" : "已儲存，立即生效。", false);
+      settingsMessage(body.restart_needed
+        ? "已儲存。名字、喚醒詞、麥克風／喇叭與喚醒靈敏度在重新啟動後生效（按「結束程式」再重新啟動）。"
+        : "已儲存，立即生效。", false);
     }
   } catch (e) {
     settingsMessage("無法連線，請再試一次", true);

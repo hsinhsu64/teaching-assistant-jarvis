@@ -9,22 +9,19 @@ from __future__ import annotations
 import base64
 import io
 import re
-import shutil
-import tempfile
 import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import qrcode
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import eventlog
-from .config import REPO_ROOT, load_config
-from .deck import list_decks
-from .deck import DeckError
+from .config import FOLDERS, REPO_ROOT, load_config
+from .converter import SOURCE_SUFFIXES
 from . import first_run, persona, settings_store
 from .host_phone import CODE_TTL
 from .hub import Hub
@@ -34,7 +31,6 @@ from .state import AppState
 if TYPE_CHECKING:
     from .jobs import JobRunner
 
-UPLOAD_SUFFIXES = {".pdf", ".pptx", ".ppt"}
 
 WEB_DIR = REPO_ROOT / "web"
 # 手機 app 只能提供這些靜態檔（主持人／投影畫面的檔案不得經 tunnel 外流）
@@ -158,14 +154,26 @@ class SettingsBody(BaseModel):
     specialty: str = ""
     meeting_type: str
     meeting_type_other: str = ""
+    audio_device: str | None = None    # None＝這次沒送（不改）；""＝電腦預設
+    speaker_device: str | None = None
+    wake_sensitivity: str | None = None  # None＝這次沒送（不改）
 
 
 SETTING_KEYS = ("display_name", "wake_word", "specialty", "meeting_type", "meeting_type_other")
+RESTART_KEYS = (*settings_store.DEVICE_KEYS, "wake_sensitivity")  # 選填；啟動時才套用，改了要重新啟動
+
+
+def system_device_names() -> dict[str, list[str]]:
+    """這台電腦的麥克風與喇叭名稱（啟動時的清單；新插的裝置要重新啟動才會出現）。"""
+    from .audio_io import list_device_names
+
+    return {"input": list_device_names("input"), "output": list_device_names("output")}
 
 
 def create_control_app(state: AppState, hub: Hub, jobs: "JobRunner | None" = None, viewer=None,
                        config_path: Path = first_run.CONFIG_PATH, diagnostics_dir: Path | None = None,
-                       logs_dir: Path | None = None) -> FastAPI:
+                       logs_dir: Path | None = None, device_names=system_device_names,
+                       pick_folder=first_run.pick_folder_dialog) -> FastAPI:
     app = FastAPI(title="控制台", docs_url=None, redoc_url=None)
     state.on_change = lambda: hub.notify(state)
     app.mount("/static", StaticFiles(directory=WEB_DIR, check_dir=False), name="static")
@@ -221,7 +229,7 @@ def create_control_app(state: AppState, hub: Hub, jobs: "JobRunner | None" = Non
         from .oe_deck import deck_links
 
         deck = state.deck
-        if state.temp_kind != "oe" or deck is None:
+        if state.temp_kind not in ("oe", "summary") or deck is None:
             return []
         return deck_links(Path(deck.path), index)
 
@@ -345,30 +353,65 @@ def create_control_app(state: AppState, hub: Hub, jobs: "JobRunner | None" = Non
     def get_settings():
         """表單顯示已存檔的值（名字、喚醒詞存檔後要重新啟動才生效，但表單要看到自己剛存的）。"""
         p, c = persona.current(), state.config
-        values = {"display_name": c.display_name, "wake_word": c.wake_word, "specialty": p.specialty,
-                  "meeting_type": p.meeting_type, "meeting_type_other": p.meeting_type_other}
+        values = {"data_root": str(c.data_root or ""), "display_name": c.display_name, "wake_word": c.wake_word,
+                  "specialty": p.specialty,
+                  "meeting_type": p.meeting_type, "meeting_type_other": p.meeting_type_other,
+                  "audio_device": c.audio_device, "speaker_device": c.speaker_device,
+                  "wake_sensitivity": c.wake_sensitivity}
         if config_path.exists():
             saved = load_config(config_path)
             raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
-            values.update({k: getattr(saved, k) for k in SETTING_KEYS if k in raw})
-        return {**values, "meeting_types": list(persona.MEETING_TYPES)}
+            values.update({k: getattr(saved, k) for k in (*SETTING_KEYS, *RESTART_KEYS) if k in raw})
+            if raw.get("data_root"):
+                values["data_root"] = str(saved.data_root)  # 剛換過、還沒重新啟動：表單顯示新的
+        try:
+            names = device_names()
+        except Exception:  # 音訊系統出錯時選單只剩「電腦預設」與已存的值，設定頁照常可用
+            names = {"input": [], "output": []}
+        return {**values, "meeting_types": list(persona.MEETING_TYPES),
+                "mic_options": settings_store.device_options(values["audio_device"], names.get("input", [])),
+                "speaker_options": settings_store.device_options(values["speaker_device"], names.get("output", [])),
+                "wake_sensitivity_options": settings_store.sensitivity_options()}
 
     @app.post("/api/settings")
     def post_settings(body: SettingsBody):
         values = {k: getattr(body, k).strip() for k in SETTING_KEYS}
-        errors = settings_store.validate(values)
+        # 裝置與靈敏度欄位沒送＝不改（舊版畫面或其他用戶端不會把麥克風設定清掉）
+        devices = {k: getattr(body, k).strip() for k in RESTART_KEYS if getattr(body, k) is not None}
+        errors = settings_store.validate({**values, **devices})
         if errors:
             return JSONResponse({"errors": errors}, status_code=422)
-        settings_store.upsert_keys(config_path, values)
+        settings_store.upsert_keys(config_path, {**values, **devices})
         running = persona.current()
+        # 麥克風、喇叭與喚醒靈敏度在啟動時套用，改了要重新啟動
         restart_needed = (values["display_name"] != state.config.display_name
-                          or (values["wake_word"] or values["display_name"]) != state.config.effective_wake_word)
+                          or (values["wake_word"] or values["display_name"]) != state.config.effective_wake_word
+                          or any(v != getattr(state.config, k) for k, v in devices.items()))
         # 名字要重新啟動才換（語音、喚醒詞都用啟動時的名字）；專科與會議類型立刻生效
         persona.set_persona(persona.Persona(running.display_name, values["specialty"], values["meeting_type"],
                                             values["meeting_type_other"]))
         eventlog.log("settings_saved", source="host", restart_needed=restart_needed)
         state._changed()
         return {"ok": True, "restart_needed": restart_needed}
+
+    @app.post("/api/settings/folder")
+    def change_folder():
+        """跳出選資料夾視窗（選已有的，或在視窗裡新增）；建好子資料夾、記進 config.toml，重新啟動後生效。
+        原本資料夾裡的檔案不搬、不刪。"""
+        picked = pick_folder(state.config.data_root or first_run.picker_start_dir())
+        if not picked:
+            return {"ok": False, "cancelled": True}
+        root = Path(picked)
+        if first_run.inside_install_folder(root):
+            raise HTTPException(422, f"資料夾不能放在安裝資料夾（{REPO_ROOT}）裡面：更新或移除程式時會被刪除。")
+        try:
+            for name in FOLDERS:
+                (root / name).mkdir(parents=True, exist_ok=True)
+            first_run.save_data_root(config_path, root)
+        except OSError as e:
+            raise HTTPException(500, f"無法建立資料夾：{e}") from e
+        eventlog.log("data_folder_changed", source="host")
+        return {"ok": True, "folder": str(root), "restart_needed": root != state.config.data_root}
 
     @app.post("/api/diagnostics")
     def post_diagnostics():
@@ -407,7 +450,7 @@ def create_control_app(state: AppState, hub: Hub, jobs: "JobRunner | None" = Non
 
     @app.get("/api/decks")
     def decks():
-        paths = list_decks(state.config.folder("簡報"))
+        paths = state.list_deck_files()
         state.set_deck_paths(paths)
         return [{"name": p.stem, "path": str(p)} for p in paths]
 
@@ -415,16 +458,22 @@ def create_control_app(state: AppState, hub: Hub, jobs: "JobRunner | None" = Non
     async def open_deck(body: DeckBody):
         folder = state.config.folder("簡報").resolve()
         path = Path(body.path).resolve()
-        if path.parent != folder or path.suffix.lower() != ".pdf" or not path.exists():
-            raise HTTPException(400, "只能開啟「簡報」資料夾內的 PDF")
+        if path.parent != folder or path.suffix.lower() not in (".pdf", *SOURCE_SUFFIXES) or not path.exists():
+            raise HTTPException(400, "只能開啟「簡報」資料夾內的 PDF 或 pptx")
         if state.presenting:
             raise HTTPException(409, "播放中請先回到主畫面")
-        state.open_deck(path)
-        return {"deck": state.deck.name if state.deck else None}
+        result = state.request_deck(path, play=False)  # 還沒轉的 pptx：在背景轉，好了自動打開
+        if result in ("busy", "error"):
+            raise HTTPException(409, state.deck_request_reply(result)["message"])
+        return {"deck": state.deck.name if state.deck else None,
+                "converting": path.stem if result == "converting" else None}
 
     @app.post("/api/present")
     async def present():
         """主持人「播放簡報」：播放下拉選單選的那份（§6.0；2026-11-08 起語音在線也能用）。"""
+        converting = state.play_after_conversion()
+        if converting:  # 選的 pptx 還在轉：轉好直接播放
+            return {"presenting": False, "converting": converting}
         if state.deck is None:
             raise HTTPException(409, "尚未選擇簡報")
         state.play(state.deck.path)
@@ -527,36 +576,6 @@ def create_control_app(state: AppState, hub: Hub, jobs: "JobRunner | None" = Non
             raise HTTPException(404)
         return FileResponse(path, headers={"Cache-Control": "max-age=3600"})
 
-    @app.post("/api/answer/card")
-    def answer_card():
-        """把目前的回答整理成一張字卡：存 PNG 到 紀錄\字卡\，並投影全螢幕。"""
-        from datetime import datetime
-
-        from .card import render_card
-
-        a = state.answer
-        if a is None or a.status != "answered" or not a.cards:
-            raise HTTPException(409, "目前沒有已驗證的回答可以整理成字卡")
-        slug = "".join(ch for ch in (a.interpreted or a.question) if ch.isalnum() or ch in " -_")[:30].strip()
-        name = f"{datetime.now():%Y-%m-%d_%H%M%S}_{slug or 'card'}.png"
-        path = render_card(a, state.config.folder("紀錄") / "字卡" / name)
-        state.card = {"answer_id": a.id, "path": str(path)}
-        state._changed()
-        return {"file": name, "folder": str(path.parent)}
-
-    @app.post("/api/answer/card/hide")
-    def answer_card_hide():
-        state.card = None
-        state._changed()
-        return {"ok": True}
-
-    @app.get("/ai/card/{answer_id}.png")
-    def ai_card(answer_id: str):
-        card = state.card
-        if not card or card["answer_id"] != answer_id or not Path(card["path"]).is_file():
-            raise HTTPException(404)
-        return FileResponse(card["path"], media_type="image/png", headers={"Cache-Control": "no-store"})
-
     @app.post("/api/answer/figure")
     def answer_figure(body: FigureBody):
         a = state.answer
@@ -570,23 +589,6 @@ def create_control_app(state: AppState, hub: Hub, jobs: "JobRunner | None" = Non
     def references():
         lib = need_jobs().library
         return [{"name": d.name, "pages": len(d.pages), "scanned": d.scanned} for d in lib.docs.values()]
-
-    @app.post("/api/references/upload")
-    def references_upload(file: UploadFile = File(...)):
-        lib = need_jobs().library
-        name = Path(file.filename or "").name  # 去掉任何路徑
-        if not name or Path(name).suffix.lower() not in UPLOAD_SUFFIXES:
-            raise HTTPException(400, "只接受 PDF、pptx、ppt")
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp) / name
-            with tmp_path.open("wb") as f:
-                shutil.copyfileobj(file.file, f)
-            try:
-                doc = lib.add_file(tmp_path)
-            except DeckError as e:
-                raise HTTPException(400, str(e))
-        state._changed()
-        return {"name": doc.name, "pages": len(doc.pages), "scanned": doc.scanned}
 
     # ---- Phase 3：語音（只在控制 app） ----
 

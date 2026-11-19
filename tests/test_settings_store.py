@@ -94,3 +94,33 @@ def test_validate_blank_wake_needs_usable_name():
 def test_validate_meeting_type():
     assert "meeting_type" in validate({**OK, "meeting_type": "晨會"})
     assert validate({**OK, "meeting_type": "其它"}) == {}
+
+
+def test_validate_device_names():
+    assert validate({**OK, "audio_device": "", "speaker_device": "喇叭 (USBMIC1.)"}) == {}
+    assert "audio_device" in validate({**OK, "audio_device": "a\nb"})
+    assert "speaker_device" in validate({**OK, "speaker_device": "x" * 101})
+
+
+def test_device_options_default_first_and_keeps_saved_substring():
+    from xiaoshen.settings_store import device_options
+
+    names = ["麥克風 (USBMIC1.)", "麥克風排列 (Realtek(R) Audio)"]
+    # 已存的是名稱片段：對到的那一項保留原本的值，不必改寫設定
+    assert device_options("usbmic", names) == [
+        {"value": "", "label": "電腦預設"},
+        {"value": "usbmic", "label": "麥克風 (USBMIC1.)"},
+        {"value": "麥克風排列 (Realtek(R) Audio)", "label": "麥克風排列 (Realtek(R) Audio)"},
+    ]
+    # 已存的裝置目前沒接上：仍列出，存檔時不會被悄悄改掉
+    assert device_options("USBMIC", names[1:]) == [
+        {"value": "", "label": "電腦預設"},
+        {"value": "USBMIC", "label": "USBMIC（目前沒有接上）"},
+        {"value": "麥克風排列 (Realtek(R) Audio)", "label": "麥克風排列 (Realtek(R) Audio)"},
+    ]
+    assert device_options("", []) == [{"value": "", "label": "電腦預設"}]
+
+
+def test_validate_wake_sensitivity():
+    assert validate({**OK, "wake_sensitivity": "high"}) == {}
+    assert "wake_sensitivity" in validate({**OK, "wake_sensitivity": "超高"})

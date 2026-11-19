@@ -28,6 +28,26 @@ def find_device(name_part: str, kind: Literal["input", "output"], devices: list[
     return None
 
 
+_MAPPER = ("sound mapper", "音效對應表")  # Windows MME 的「預設裝置」代稱，選單另有「電腦預設」
+
+
+def list_device_names(kind: Literal["input", "output"], devices: list[dict] | None = None,
+                      hostapi: int | None = None) -> list[str]:
+    """「設定」選單用的裝置名稱：只列預設音訊介面（Windows MME／Mac Core Audio）的裝置，不重複。
+
+    find_device 取第一個名稱相符的裝置，預設介面排在最前面，選到的名稱一定對得到同一個裝置。"""
+    devices = list(sd.query_devices()) if devices is None else devices
+    hostapi = sd.default.hostapi if hostapi is None else hostapi
+    key = "max_input_channels" if kind == "input" else "max_output_channels"
+    names: list[str] = []
+    for d in devices:
+        name = str(d.get("name", ""))
+        if (d.get("hostapi") == hostapi and d.get(key, 0) > 0 and name and "\n" not in name
+                and not any(m in name.lower() for m in _MAPPER) and name not in names):
+            names.append(name)
+    return names
+
+
 def to_float(pcm: bytes) -> np.ndarray:
     return np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768
 

@@ -30,8 +30,8 @@ class Config:
     display_monitor: int = 1
     browser: Path | None = field(default_factory=lambda: default_browser())  # None＝找不到 Edge／Chrome，改用預設瀏覽器
     cloudflared: Path | None = None
-    keys_next: list[str] = field(default_factory=lambda: ["PageDown", "ArrowRight", " "])
-    keys_prev: list[str] = field(default_factory=lambda: ["PageUp", "ArrowLeft"])
+    keys_next: list[str] = field(default_factory=lambda: ["PageDown", "ArrowRight", "ArrowDown", " "])
+    keys_prev: list[str] = field(default_factory=lambda: ["PageUp", "ArrowLeft", "ArrowUp"])
     keys_drawer: list[str] = field(default_factory=lambda: ["b", "B", "."])
     # Phase 2：AI 回答與出題（金鑰只從環境變數 GEMINI_API_KEY 讀取）
     model_answer: str = "gemini-3.1-pro-preview"
@@ -39,13 +39,15 @@ class Config:
     # 主要模型配額用完、過載或不存在時依序改用
     ai_timeout_seconds: float = 150      # 文字模型每次回答／出題的總時限（解讀型問題曾超過 90 秒）
     model_ocr: str = "gemini-3.5-flash"  # 投影片圖片抄錄（只抄不解讀，用快模型）
+    model_results: str = "gemini-3.5-flash"  # 問目前列出的文獻（年份、期刊）用的快模型
     model_fallbacks: list[str] = field(default_factory=lambda: ["gemini-3.5-flash", "gemini-3.8-flash"])
     oe_script: Path = Path.home() / ".claude" / "skills" / "openevidence" / "scripts" / "oe.py"
     # openevidence-mcp 資料夾（轉接程式＋附的 oe.py）；None＝找 ~/openevidence-mcp、~/.claude/mcp-servers/openevidence-mcp
     oe_mcp_dir: Path | None = None
     max_reference_chars: int = 400_000
     # 原文重點摘要簡報（§6.2b，用 Flash：較快、省費用）
-    model_summary: str = "gemini-3.5-flash"
+    model_summary: str = "gemini-3.1-pro-preview"
+    summary_thinking: str = "low"  # 摘要的思考量：low 較快（實測 41 秒 vs 預設 65 秒）；留空＝模型預設
     model_clarify: str = "gemini-3.5-flash"  # 送 OpenEvidence 前判斷要不要反問（§6.2c，用快模型）
     summary_timeout_seconds: float = 170   # 語音最多等 180 秒
     summary_max_chars: int = 600_000       # 超過就截斷並在第一頁註明讀到第幾頁
@@ -57,6 +59,7 @@ class Config:
     kws_model_dir: Path = field(default_factory=lambda: app_data_dir() / "models" / KWS_MODEL_NAME)
     kws_threshold: float = 0.25
     kws_score: float = 1.0
+    wake_sensitivity: str = "medium"  # 喚醒靈敏度 low／medium／high（主持人畫面「設定」可改，重新啟動後生效）
     audio_device: str = ""        # 麥克風名稱的一部分；空字串 = 系統預設
     speaker_device: str = ""      # 喇叭名稱的一部分；空字串 = Windows 預設輸出（平常聽得到聲音的地方）
     voice_idle_seconds: float = 8.0         # 叫醒後幾秒內要開始問

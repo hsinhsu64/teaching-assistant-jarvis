@@ -16,6 +16,7 @@ from typing import Callable
 from .answering import LITERATURE_ROUTES
 from .deck import Deck, DeckError
 from .platform_support import kill_profile_processes
+from .fulltext import NeedsFallback, fetch_full_text
 from .grounding import match_quote, normalize_keep
 from .pubmed import PubMedError, _default_get, fetch_pmid, lookup_doi, pmc_fulltext, pmc_id
 from .source_text import SourceDoc, SourceUnreadable, fetch_bytes, pdf_pages
@@ -118,7 +119,7 @@ class SourceViewer:
                 return {"status": "no_source", "message": "這張沒有文獻出處"}
             if kind == "web":
                 return self._show_web(ans, gen, n, card, ref)
-            abstract, title = self._abstract_for(ref)
+            abstract, title = self.abstract_for(ref)
             if not abstract and self.web is not None:
                 # 沒有摘要（例如指引 PDF）就直接開原文網頁
                 res = self._show_web(ans, gen, n, card, ref)
@@ -171,8 +172,8 @@ class SourceViewer:
         st = self.state
         with st.lock:
             ans, gen = st.answer, st.source_gen
-            playing = st.summary_path if st.temp_kind == "oe" else None
-        if playing is not None:  # 投影上那份 OE 簡報自己的文獻，不是目前的回答（審查 C2）
+            playing = st.summary_path if st.temp_kind in ("oe", "summary") else None
+        if playing is not None:  # 投影上那份 OE 簡報／摘要簡報自己的文獻，不是目前的回答（審查 C2）
             from .oe_deck import deck_ref
 
             c = deck_ref(playing, ref)
@@ -220,11 +221,8 @@ class SourceViewer:
             pages = [deck.page_text(i) for i in range(deck.page_count)]
             if not any(p.strip() for p in pages):
                 raise SourceUnreadable("這份是掃描檔，讀不到文字")
-            return SourceDoc(deck.name, citation, pages, paged=True, full_text=True)
-        if view.get("ref"):  # 從 OE 簡報點開的文獻（§6.2c）：用打開當時記下的那篇
-            ref = view.get("ref_detail") or self.resolve_ref(ans, view["ref"])
-        else:
-            ref = ans.references.get(card.refs[0]) if card is not None and card.refs else None
+            return SourceDoc(deck.name, citation, pages, paged=True, full_text=True, origin="pdf")
+        ref = self._ref_for(view, ans, card)
         if ref is None:
             raise SourceUnreadable("這張沒有文獻出處")
         title = ref.get("title") or citation
@@ -234,26 +232,50 @@ class SourceViewer:
             if m:
                 text = self._pmc_text(m.group(1))
                 if text:
-                    return SourceDoc(title, citation, [text], paged=False, full_text=True)
+                    return SourceDoc(title, citation, [text], paged=False, full_text=True, origin="pmc")
             else:
                 try:
                     data, _ = get_bytes(url)
                 except SourceUnreadable:
                     data = b""
                 if data.startswith(b"%PDF"):
-                    return SourceDoc(title, citation, pdf_pages(data), paged=True, full_text=True)
-        elif ref.get("pmid"):
-            try:
-                pmc = pmc_id(str(ref["pmid"]), http_get=self.http_get)
-            except PubMedError:
-                pmc = ""
-            text = self._pmc_text(pmc) if pmc else ""
-            if text:
-                return SourceDoc(title, citation, [text], paged=False, full_text=True)
-        abstract, abs_title = self._abstract_for(ref)
+                    return SourceDoc(title, citation, pdf_pages(data), paged=True, full_text=True, origin="web")
+        return self.full_doc(ref, citation, get_bytes)
+
+    @staticmethod
+    def _ref_for(view: dict, ans, card) -> dict | None:
+        if view.get("ref"):  # 從 OE 簡報點開的文獻（§6.2c）：用打開當時記下的那篇
+            return view.get("ref_detail") or SourceViewer.resolve_ref(ans, view["ref"])
+        return ans.references.get(card.refs[0]) if card is not None and card.refs else None
+
+    def current_ref(self) -> dict | None:
+        """投影上打開的原文是哪一篇文獻；簡報／參考資料的頁面回 None。"""
+        st = self.state
+        with st.lock:
+            view, ans = st.source_view, st.answer
+        if not view or view.get("kind") == "page" or ans is None:
+            return None
+        n = int(view.get("card") or 0)
+        card = ans.cards[n - 1] if 1 <= n <= len(ans.cards) else None
+        return self._ref_for(view, ans, card)
+
+    def full_doc(self, ref: dict, citation: str = "",
+                 get_bytes: Callable[[str], tuple[bytes, str]] = fetch_bytes) -> SourceDoc:
+        """全文：參考資料 PDF → PMC → Europe PMC → OpenAlex；都沒有丟 NeedsFallback（改請 OE 整理）。"""
+        doc = fetch_full_text(ref, self.library, self.http_get, get_bytes, self._pmc_text)
+        if doc is None:
+            raise NeedsFallback(ref)
+        if citation:
+            doc.citation = citation
+        return doc
+
+    def abstract_doc(self, ref: dict, citation: str = "") -> SourceDoc:
+        """最後退路：只讀摘要（封面照實標明）。"""
+        abstract, abs_title = self.abstract_for(ref)
         if not abstract:
             raise SourceUnreadable("讀不到這篇的全文或摘要")
-        return SourceDoc(abs_title or title, citation, [abstract], paged=False, full_text=False, note=ABSTRACT_ONLY)
+        return SourceDoc(abs_title or ref.get("title") or citation, citation, [abstract], paged=False,
+                         full_text=False, note=ABSTRACT_ONLY, origin="abstract")
 
     def _pmc_text(self, pmcid: str) -> str:
         try:
@@ -294,7 +316,7 @@ class SourceViewer:
                                 "citation": card.source, "url": f"/source/page.png?v={self._seq}"}, page_deck=deck)
         return {"status": "ok", "message": note}
 
-    def _abstract_for(self, ref: dict) -> tuple[str, str]:
+    def abstract_for(self, ref: dict) -> tuple[str, str]:
         """回傳（摘要, 標題）；OpenEvidence 文獻有 PMID 就直接取，否則用 DOI 到 PubMed 找。"""
         if ref.get("abstract"):
             return ref["abstract"], ref.get("title", "")

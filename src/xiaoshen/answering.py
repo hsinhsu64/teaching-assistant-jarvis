@@ -154,6 +154,7 @@ class Answer:
     oe_deck: str = ""      # 簡報 PDF 路徑
     oe_pages: int = 0
     oe_play: str = ""      # oe_playing／oe_confirm（正在播簡報，先問）／oe_waiting_quiz（派題中，先等）
+    card_file: str = ""    # 自動存檔的字卡 PNG 檔名（紀錄\字卡\，2026-11-19）
 
     def to_dict(self, with_quotes: bool = True, for_display: bool = False) -> dict:
         d = {
@@ -161,7 +162,7 @@ class Answer:
             "summary_zh": self.summary_zh, "clarify_zh": self.clarify_zh, "error": self.error,
             "error_detail": self.error_detail, "fallback_from": self.fallback_from,
             "fallback_note": self.fallback_note,
-            "interpreted": self.interpreted, "tables": self.tables,
+            "interpreted": self.interpreted, "tables": self.tables, "card_file": self.card_file,
             "derivations": [{"text": d.text, "sources": d.sources, "uses": d.uses} for d in self.derivations],
             "derivation_notes": list(self.derivation_notes),
             "cards": [{"point_zh": c.point_zh, "source": c.source,

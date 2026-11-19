@@ -268,7 +268,7 @@ document.getElementById("ctl").addEventListener("click", async (ev) => {
   } else {
     return;
   }
-  msgEl.className = r.status === "ok" ? "msg" : "msg err";
+  msgEl.className = r.status === "ok" || r.status === "converting" ? "msg" : "msg err";
   msgEl.textContent = r.status === "ok" ? "" : (r.message || "");
   pollControl();
 });

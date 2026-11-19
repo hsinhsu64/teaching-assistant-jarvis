@@ -84,3 +84,17 @@ def test_speaker_stop_keeps_tail(monkeypatch):
     spk.play(b"\x01\x00" * 2400)
     spk.stop()
     assert spk.is_playing()  # 裝置緩衝裡的聲音還在播，尾巴照算
+
+
+def test_list_device_names_default_hostapi_only_without_mapper_and_duplicates():
+    from xiaoshen.audio_io import list_device_names
+
+    devices = [{**d, "hostapi": 0} for d in DEVICES] + [
+        {"name": "麥克風 (USBMIC1.)", "hostapi": 1, "max_input_channels": 1, "max_output_channels": 0},
+        {"name": "麥克風排列 (Realtek(R) Audio)", "hostapi": 1, "max_input_channels": 2, "max_output_channels": 0},
+        {"name": "Microsoft Sound Mapper - Output", "hostapi": 0, "max_input_channels": 0, "max_output_channels": 2},
+        {"name": "麥克風 (USBMIC1.)", "hostapi": 0, "max_input_channels": 1, "max_output_channels": 0},
+    ]
+    assert list_device_names("input", devices, hostapi=0) == ["麥克風 (USBMIC1.)"]
+    assert list_device_names("output", devices, hostapi=0) == ["喇叭 (USBMIC1.)", "Realtek Digital Output"]
+    assert list_device_names("input", devices, hostapi=1) == ["麥克風 (USBMIC1.)", "麥克風排列 (Realtek(R) Audio)"]

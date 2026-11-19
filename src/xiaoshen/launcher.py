@@ -18,7 +18,7 @@ from typing import Callable
 from .config import Config, load_config
 from .platform_support import app_data_dir, kill_profile_processes, monitor_rects
 from . import eventlog, persona
-from .deck import list_decks, set_renderer
+from .deck import set_renderer
 from .hub import Hub
 from .pubmed import search_pubmed
 from .quizbank import load_bank
@@ -30,13 +30,14 @@ from .llm import GeminiLLM
 from .oe_client import oe_auth_ok
 from .oe_relay import relay_connected
 from .oe_setup import ensure_relay, find_oe_mcp, resolve_oe_script
-from .selfcheck import _default_http_get, openevidence_result, references_check, run_checks
+from .selfcheck import (PHONE_FIRST_CHECK_DELAY, PHONE_GIVE_UP_SECONDS, _default_http_get, confirm_phone_link,
+                        openevidence_result, references_check, run_checks)
 from .slide_ocr import SlideReader, gemini_transcriber
 from .first_run import ensure_data_folder
 from .host_phone import create_gateway
 from .phone_mic import PhoneMicMux
 from .server import create_control_app, create_phone_app
-from .converter import powerpoint_available, powerpoint_convert
+from .converter import convert_file, powerpoint_available, powerpoint_convert
 from .state import AppState, check_phone_link, refresh_presentations
 from .tunnel import TunnelError, TunnelHandle, find_cloudflared, start_quick_tunnel
 
@@ -100,9 +101,10 @@ def close_app_windows(profile_root: Path, kill: Callable[[Path], None] | None = 
 
 def make_quit_handler(loop: asyncio.AbstractEventLoop, quit_event: asyncio.Event,
                       delay: float = QUIT_DELAY) -> Callable[[], None]:
-    """給 /api/quit 用：可在任何執行緒呼叫；delay 秒後才設定 quit_event（先讓回應送出去）。"""
-    def handler() -> None:
-        loop.call_soon_threadsafe(loop.call_later, delay, quit_event.set)
+    """給 /api/quit 與語音「結束程式」用：可在任何執行緒呼叫；delay 秒後才設定 quit_event
+    （先讓回應送出去）。語音結束時傳較長的 after，讓助理把話說完。"""
+    def handler(after: float | None = None) -> None:
+        loop.call_soon_threadsafe(loop.call_later, delay if after is None else after, quit_event.set)
     return handler
 
 
@@ -166,13 +168,15 @@ def build_detector(config: Config):
     reason = validate_wake_word(word)
     if reason is None:
         try:
-            detector = WakeWordDetector(config.kws_model_dir, config.kws_threshold, config.kws_score, word)
+            detector = WakeWordDetector(config.kws_model_dir, config.kws_threshold, config.kws_score, word,
+                                        config.wake_sensitivity)
             persona.set_wake_word(detector.wake_label)
             return detector, None
         except UnknownTokenError as e:
             reason = str(e)
     warning = f"喚醒詞「{word}」無法使用（{reason}），已改用預設喚醒詞「{DEFAULT_WAKE}」"
-    detector = WakeWordDetector(config.kws_model_dir, config.kws_threshold, config.kws_score, DEFAULT_WAKE)
+    detector = WakeWordDetector(config.kws_model_dir, config.kws_threshold, config.kws_score, DEFAULT_WAKE,
+                                config.wake_sensitivity)
     persona.set_wake_word(detector.wake_label)
     return detector, warning
 
@@ -265,18 +269,18 @@ async def _amain() -> None:
     state.warnings.extend(f"題庫 {w}" for w in bank_warnings)
     if relay_note:
         state.warnings.append(relay_note)
-    # 先把 pptx／ppt 轉成 PDF，「最新簡報」才會是剛改好的那份
+    # 開機不轉 pptx（要開 PowerPoint，很慢）：自我檢查後在背景轉；要播放還沒轉好的那份時才先轉它
     convert = powerpoint_convert if config.auto_convert_pptx and powerpoint_available() else None
     reported: set = set()
-    await asyncio.to_thread(refresh_presentations, state, convert, reported)
-    decks = list_decks(config.folder("簡報"))
-    state.set_deck_paths(decks)
-    if decks:
-        state.open_deck(decks[0])  # 「今天的簡報」，開機不投影（§6.0 主畫面）
+    if convert is None:  # 不能轉：只在自我檢查標示哪些 pptx 要手動匯出（不開 PowerPoint）
+        await asyncio.to_thread(refresh_presentations, state, convert, reported)
+    else:
+        state.deck_converter = lambda src: convert_file(src, convert)
+    await asyncio.to_thread(state.refresh_deck_list)  # 「今天的簡報」，開機不投影（§6.0 主畫面）
 
     # Phase 2：參考資料索引與 AI 背景工作
     library = Library(config.folder("參考資料"), convert)
-    library_warnings = await asyncio.to_thread(library.refresh)
+    library_warnings = await asyncio.to_thread(library.refresh, False)  # pptx 之後在背景轉
     llm = GeminiLLM(config.model_fallbacks, timeout=config.ai_timeout_seconds)
     # OE 之後再查 PubMed；都沒有才用 Gemini 一般知識（標示未經文獻驗證）
     jobs = JobRunner(state, llm, config, library, pubmed=search_pubmed, knowledge_fallback=True)
@@ -295,9 +299,12 @@ async def _amain() -> None:
         await asyncio.sleep(0.1)
 
     tunnel: TunnelHandle | None = None
+    tunnel_at = 0.0
     try:
         tunnel = await asyncio.to_thread(start_quick_tunnel, config.phone_port, find_cloudflared(config.cloudflared))
+        tunnel_at = time.monotonic()
         state.public_base = tunnel.url
+        state.phone_pending = True  # 自我檢查不等它：背景確認連上才顯示 QR Code（watch_phone_link）
     except TunnelError as e:
         state.warnings.append(str(e))
 
@@ -309,7 +316,7 @@ async def _amain() -> None:
 
     voice_checks = voice_check_functions(config) if config.voice_enabled else {}
     checks = await asyncio.to_thread(
-        run_checks, config, state, None, bank_warnings, 6, 3.0,
+        run_checks, config, state, bank_warnings,
         llm_check=llm_check, oe_check=lambda: oe_auth_ok(config.oe_script), oe_tab_check=relay_connected,
         library=library, library_warnings=library_warnings, **voice_checks)
     state.checks = [c.to_dict() for c in checks]
@@ -328,6 +335,9 @@ async def _amain() -> None:
                 state.warnings.append(f"語音無法啟動：{e}")
         state._changed()
     async def watch_phone_link():
+        if state.phone_pending:
+            await confirm_phone_link(state, _default_http_get, not_before=tunnel_at + PHONE_FIRST_CHECK_DELAY,
+                                     give_up_at=tunnel_at + PHONE_GIVE_UP_SECONDS)
         while True:
             await asyncio.sleep(PHONE_CHECK_SECONDS)
             await asyncio.to_thread(check_phone_link, state, _default_http_get)
@@ -354,15 +364,12 @@ async def _amain() -> None:
             await asyncio.sleep(5)
 
     async def watch_presentations():
+        """自我檢查跑完後馬上轉一次（開機時沒轉的 pptx），之後每 30 秒檢查有沒有新的或改過的。"""
         while True:
-            await asyncio.sleep(PRESENTATION_CHECK_SECONDS)
             await asyncio.to_thread(refresh_presentations, state, convert, reported)
             await asyncio.to_thread(refresh_library)
-            decks = await asyncio.to_thread(list_decks, config.folder("簡報"))
-            state.set_deck_paths(decks)
-            if state.deck is None:
-                if decks:
-                    state.open_deck(decks[0])
+            await asyncio.to_thread(state.refresh_deck_list)
+            await asyncio.sleep(PRESENTATION_CHECK_SECONDS)
 
     watchers = [asyncio.create_task(watch_phone_link()), asyncio.create_task(watch_presentations())]
     quit_event = asyncio.Event()

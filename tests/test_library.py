@@ -84,3 +84,13 @@ def test_rank_names_substring_and_case():
 
 def test_rank_names_no_match_and_empty():
     assert rank_names("腎移植", ["VCUG 判讀"]) == [] and rank_names("  ", ["A"]) == []
+
+
+def test_refresh_can_skip_pptx_conversion_at_startup(tmp_path, make_pdf):
+    """開機時只整理已有的 PDF；pptx 之後在背景轉。"""
+    make_pdf(["Ready"], folder=tmp_path, name="Ready.pdf")
+    (tmp_path / "Slow.pptx").write_bytes(b"pptx")
+    calls = []
+    lib = Library(tmp_path, convert=lambda s, d: calls.append(s.name))
+    lib.refresh(convert=False)
+    assert calls == [] and set(lib.docs) == {"Ready"}

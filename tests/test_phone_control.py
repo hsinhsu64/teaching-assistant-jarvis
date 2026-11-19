@@ -17,7 +17,8 @@ def hud_state(config, make_pdf, bank_question):
     st = AppState(config, {("D", 2): bank_question})
     st.open_deck(deck)
     st.set_deck_paths([deck])
-    st.phone_search_enabled = True  # §6.3a：預設關閉；這裡的測試假設主持人已開放
+    st.phone_search_enabled = True   # §6.3a：預設關閉；這裡的測試假設主持人已開放
+    st.phone_control_enabled = True  # 2026-11-18 起也預設關閉；同上
     return st
 
 
@@ -285,6 +286,16 @@ def test_search_off_by_default(config):
     assert pc(st, jobs).view()["search_enabled"] is False
 
 
+def test_control_off_by_default(config):
+    """2026-11-18：手機投影控制也預設關閉，主持人在「手機操作」區打開才能用。"""
+    from xiaoshen.state import AppState
+
+    st = AppState(config, {})
+    r = pc(st).end()
+    assert st.phone_control_enabled is False and r["status"] == "paused"
+    assert pc(st).view()["control_enabled"] is False and st.snapshot("host")["phone_control_enabled"] is False
+
+
 def test_teacher_question_goes_to_host_only(hud_state):
     r = pc(hud_state).teacher("c1", "老師，CNI 要用多久？")
     assert r == {"status": "ok", "message": "已送給老師"}
@@ -436,3 +447,15 @@ def test_oe_play_endpoint_replays_ended_deck(hud_state, make_pdf, config):
     with TestClient(create_control_app(hud_state, Hub(), jobs)) as c:
         assert c.post("/api/oe/play").json() == {"ok": True}
     assert hud_state.temp_kind == "oe" and hud_state.snapshot("host")["ai_answer"]["oe_deck"]["play"] == "oe_playing"
+
+
+def test_play_unconverted_pptx_from_phone(hud_state, make_pdf):
+    folder = hud_state.config.folder("簡報")
+    src = folder / "New.pptx"
+    src.write_bytes(b"pptx")
+    hud_state.set_deck_paths([src, *hud_state.deck_paths])
+    hud_state.deck_converter = lambda s: make_pdf(["New " * 5], folder=s.parent, name=s.stem + ".pdf")
+    r = pc(hud_state).play("deck", "New")
+    assert r["status"] == "converting" and "好了會自動播放" in r["message"]
+    hud_state._convert_thread.join(5)
+    assert hud_state.presenting and hud_state.deck.name == "New"

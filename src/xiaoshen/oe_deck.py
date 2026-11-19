@@ -2,7 +2,7 @@
 
 不改寫、不翻譯、不濃縮；每頁標「OpenEvidence 原文」。依小標題分頁，圖表放在原文中的位置，
 最後幾頁是參考文獻。正文的 [n] 只有能可靠對應到文獻時才加連結（寧可沒有出處也不標錯）；
-對應不上的文獻列在「其他引用文獻（無法確認對應編號）」，可點但不標編號。
+對應不上的文獻列在「OE 也引用了以下文獻（未標編號）」，可點但不標編號。
 
 連結兩份：PDF 內的連結（DOI → PubMed → OpenEvidence 給的連結，不需上網；會後發給住院醫師也能點），
 與旁邊的 <pdf>.links.json（投影幕點擊區：哪一頁、哪個框、哪一篇），由伺服器開啟時再查 PMC 全文。
@@ -25,7 +25,7 @@ from .oe_client import OEResult, _cells
 from .summary_deck import _UNSAFE, BODY, CONTINUED, HEIGHT, WIDTH, _frame
 
 ORIGINAL = "OpenEvidence 原文"
-OTHER_REFS = "其他引用文獻（無法確認對應編號）"
+OTHER_REFS = "OE 也引用了以下文獻（未標編號）"  # 程式無法確定它們在內文是第幾號，寧可不標也不標錯
 GAP = 8                       # 區塊之間的距離（pt）
 FIG_CAPTION_H = 46            # 圖下方說明的高度
 _IMAGE_LINE = re.compile(r"^\s*!\[[^\]]*]\(([^)\s]+)[^)]*\)\s*$")
@@ -313,6 +313,14 @@ def _cover_html(question: str, title: str, note: str, total: int, missing: int) 
     return '<div style="font-family: sans-serif; color:#222">' + "".join(lines) + "</div>"
 
 
+def _custom_cover_html(title: str, lines: list[str], total: int) -> str:
+    out = [f'<p style="font-size:26px; font-weight:bold; margin:0 0 10px">{html.escape(title)}</p>']
+    out += [f'<p style="font-size:18px; margin:4px 0">{html.escape(x)}</p>' for x in lines]
+    out.append(f'<p style="font-size:18px; margin:14px 0 4px; font-weight:bold">共 {total} 頁，說「下一頁」或按遙控器翻頁</p>')
+    out.append(f'<p style="font-size:13px; color:#888; margin:18px 0 0">{datetime.now():%Y-%m-%d %H:%M}</p>')
+    return '<div style="font-family: sans-serif; color:#222">' + "".join(out) + "</div>"
+
+
 def _put(page: pymupdf.Page, rect: pymupdf.Rect, html_text: str, scale_low: float = 1) -> None:
     spare, _ = page.insert_htmlbox(rect, html_text, scale_low=scale_low)
     if spare < 0:  # PyMuPDF 放不下就什麼都不寫：寧可整份失敗也不默默少字（審查 C1）
@@ -323,14 +331,18 @@ def _norm(rect: pymupdf.Rect) -> dict:
     return {"x0": rect.x0 / WIDTH, "y0": rect.y0 / HEIGHT, "x1": rect.x1 / WIDTH, "y1": rect.y1 / HEIGHT}
 
 
-def render_oe_deck(question: str, oe: OEResult, note: str, path: Path) -> OEDeckInfo:
+def render_oe_deck(question: str, oe: OEResult, note: str, path: Path, *, label: str = ORIGINAL,
+                   title: str | None = None, cover_lines: list[str] | None = None) -> OEDeckInfo:
+    """label：頁尾標示；title：指定封面標題（不拿第一個標題當封面）；
+    cover_lines：自訂封面說明（原文重點摘要用，不寫「問題」「完整照原文」）。"""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     raw = oe.raw or oe.answer
     blocks = parse_blocks(raw, oe.deck_figures)
-    title = question
-    if blocks and blocks[0][0] == "h":  # 第一個標題當封面標題
-        title = blocks.pop(0)[1]
+    if title is None:
+        title = question
+        if blocks and blocks[0][0] == "h":  # 第一個標題當封面標題
+            title = blocks.pop(0)[1]
     mapped = {c["index"]: c for c in oe.citations if c.get("index") is not None}
     entries = [(f"n:{i}", f'<div style="{_STYLE}; font-size:15px"><b>[{i}]</b> {html.escape(reference_text(c))}</div>',
                 offline_url(c)) for i, c in sorted(mapped.items())]
@@ -341,7 +353,7 @@ def render_oe_deck(question: str, oe: OEResult, note: str, path: Path) -> OEDeck
         entries.append(("", f'<div style="{_STYLE}; font-size:16px; font-weight:bold; margin-top:6px">{OTHER_REFS}</div>', ""))
         entries += [(f"o:{k}", f'<div style="{_STYLE}; font-size:15px">• {html.escape(reference_text(c))}</div>',
                      offline_url(c)) for k, c in enumerate(oe.other_citations)]
-    footer = f"{persona.current().display_name} · {ORIGINAL} · {question}"
+    footer = f"{persona.current().display_name} · {label} · {question}"
     sidecar: dict[str, list[dict]] = {}
     shown_figs = 0
     with PDF_LOCK:
@@ -353,7 +365,9 @@ def render_oe_deck(question: str, oe: OEResult, note: str, path: Path) -> OEDeck
             total = 1 + len(body_pages) + len(ref_pages)
             cover = doc.new_page(width=WIDTH, height=HEIGHT)
             _frame(cover, title, footer, 1, total)
-            cover.insert_htmlbox(BODY, _cover_html(question, title, note, total, oe.missing_figures), scale_low=0.6)
+            cover_html = (_cover_html(question, title, note, total, oe.missing_figures) if cover_lines is None
+                          else _custom_cover_html(title, cover_lines, total))
+            cover.insert_htmlbox(BODY, cover_html, scale_low=0.6)
             for n, spec in enumerate(body_pages + ref_pages, 2):
                 page = doc.new_page(width=WIDTH, height=HEIGHT)
                 _frame(page, spec[1], footer, n, total)

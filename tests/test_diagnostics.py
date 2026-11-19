@@ -1,10 +1,12 @@
 import json
 import re
+import tomllib
 import zipfile
 from datetime import datetime
 
 from fastapi.testclient import TestClient
 
+from xiaoshen.config import REPO_ROOT
 from xiaoshen.diagnostics import build_bundle
 
 NOW = datetime(2026, 11, 16, 9, 30)
@@ -36,7 +38,8 @@ def test_bundle_redacts_and_limits(tmp_path):
     assert "api_key" not in text and "Token" not in text and "COOKIE" not in text
     assert "# 註解" in text and "display_name" in text
     about = json.loads(zf.read("about.json"))
-    assert about["version"] == "0.1.0" and about["platform"] and about["python"]
+    version = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+    assert about["version"] == version and about["platform"] and about["python"]  # 跟著 pyproject，改版號不必改測試
     assert json.loads(zf.read("selfcheck.json"))[0]["name"] == "麥克風"
 
 
