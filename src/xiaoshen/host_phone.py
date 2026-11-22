@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import hmac
+import re
 import secrets
 import threading
 import time
@@ -28,7 +29,11 @@ PHONE_PATHS = {"/q", "/healthz"}
 HOST_SWITCHES = {"/api/phone/control-enabled", "/api/phone/search-enabled"}
 # 配對的手機也不給：投影片圖片、投影頁、配對本身
 DENIED_EXACT = {"/display", "/source/page.png"}
-DENIED_PREFIX = ("/slides/", "/deck/links/", "/api/host-phone/")
+DENIED_PREFIX = ("/slides/", "/deck/links/", "/api/host-phone/",
+                 # 會議記錄：去識別候選（病人姓名、病歷號）、逐字稿、會議記錄只在筆電看
+                 "/api/meetings")
+# 例外（使用者 2026-11-22 選擇）：手機看每場進度（/api/meeting-status）、按「在這台電腦轉寫」；不經手病人資料
+PHONE_MEETING_POST = re.compile(r"/api/meetings/[^/]+/transcribe-local")
 BAD_CODE_PAGE = ("<!doctype html><meta charset='utf-8'>"
                  "<meta name='viewport' content='width=device-width, initial-scale=1'>"
                  "<p>這個 QR Code 已失效，請在筆電的主持人畫面重新產生。</p>")
@@ -90,7 +95,9 @@ def _phone_side(path: str) -> bool:
     return path in PHONE_PATHS or (path.startswith("/api/phone/") and path not in HOST_SWITCHES)
 
 
-def _denied(path: str) -> bool:
+def _denied(path: str, method: str = "GET") -> bool:
+    if method == "POST" and PHONE_MEETING_POST.fullmatch(path):
+        return False
     return path in DENIED_EXACT or path.startswith(DENIED_PREFIX)
 
 
@@ -119,7 +126,7 @@ def create_gateway(phone_app, control_app, state):
             await pair_response(scope.get("query_string", b""))(scope, receive, send)
         elif _phone_side(path) or not pairing.valid(_session_cookie(scope)):
             await phone_app(scope, receive, send)
-        elif _denied(path):
+        elif _denied(path, scope.get("method", "GET")):
             await PlainTextResponse("手機不提供這項內容", 403)(scope, receive, send)
         else:
             await control_app(scope, receive, send)

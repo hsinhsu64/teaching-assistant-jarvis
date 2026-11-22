@@ -17,7 +17,7 @@ from typing import Callable
 
 from .config import Config, load_config
 from .platform_support import app_data_dir, kill_profile_processes, monitor_rects
-from . import eventlog, persona
+from . import eventlog, persona, retention
 from .deck import set_renderer
 from .hub import Hub
 from .pubmed import search_pubmed
@@ -36,6 +36,8 @@ from .slide_ocr import SlideReader, gemini_transcriber
 from .first_run import ensure_data_folder
 from .host_phone import create_gateway
 from .phone_mic import PhoneMicMux
+from .mic_tee import TeeMic, recorder_pump
+from .recording import Recorder
 from .server import create_control_app, create_phone_app
 from .converter import convert_file, powerpoint_available, powerpoint_convert
 from .state import AppState, check_phone_link, refresh_presentations
@@ -227,6 +229,27 @@ async def supervise_voice(run, state: AppState) -> None:
         state._changed()
 
 
+def setup_recorder(config: Config, state: AppState, temp_dir: Path | None = None) -> Recorder:
+    """建立會議錄音器；上次錄音中當掉留下的暫存先收尾送出（spec：錄音不能因當機而遺失）。"""
+    rec = Recorder(config, temp_dir=temp_dir)
+    for path in rec.recover_unfinished():
+        state.warnings.append(f"上次沒有正常結束的錄音已存檔並送出轉寫：{path.stem}")
+    if rec.last_error:
+        state.warnings.append(rec.last_error)
+    rec.on_change = state._changed
+    state.recorder = rec
+    return rec
+
+
+async def finish_recording(state: AppState) -> None:
+    """結束程式時還在錄音：自動停止並存檔。"""
+    rec = state.recorder
+    if rec is not None and rec.is_recording:
+        await asyncio.to_thread(rec.stop)
+    if rec is not None:
+        await asyncio.to_thread(rec.wait_idle, 60)
+
+
 async def start_voice(config: Config, state: AppState, jobs: JobRunner, library: Library,
                       viewer=None) -> asyncio.Task:
     """建立麥克風、喇叭、喚醒詞與語音 session，回傳執行中的 task。"""
@@ -241,7 +264,10 @@ async def start_voice(config: Config, state: AppState, jobs: JobRunner, library:
         state.warnings.append(warning)
     mic_index, speaker_index = voice_devices(config)
     speaker = Speaker(speaker_index)
-    mic = PhoneMicMux(MicStream(mic_index), state.phone_mic, state)  # 手機按叫醒：那一輪改收手機（§6.3b）
+    laptop_mic = MicStream(mic_index)
+    if state.recorder is not None:  # 會議錄音收的是會議室麥克風（不是手機）
+        laptop_mic = TeeMic(laptop_mic, state.recorder)
+    mic = PhoneMicMux(laptop_mic, state.phone_mic, state)  # 手機按叫醒：那一輪改收手機（§6.3b）
     backend = GeminiLiveBackend(config.live_model, config.voice_end_silence_ms, config.live_voice)
     session = VoiceSession(state, detector, backend, VoiceTools(state, jobs, library, viewer),
                            mic, speaker, idle_seconds=config.voice_idle_seconds,
@@ -266,6 +292,7 @@ async def _amain() -> None:
     set_renderer(renderer)
     bank, bank_warnings = load_bank(config.folder("題庫") / "題庫.xlsx")
     state = AppState(config, bank)
+    recorder = await asyncio.to_thread(setup_recorder, config, state)
     state.warnings.extend(f"題庫 {w}" for w in bank_warnings)
     if relay_note:
         state.warnings.append(relay_note)
@@ -371,15 +398,25 @@ async def _amain() -> None:
             await asyncio.to_thread(state.refresh_deck_list)
             await asyncio.sleep(PRESENTATION_CHECK_SECONDS)
 
-    watchers = [asyncio.create_task(watch_phone_link()), asyncio.create_task(watch_presentations())]
+    watchers = [asyncio.create_task(watch_phone_link()), asyncio.create_task(watch_presentations()),
+                asyncio.create_task(retention.watch(config))]  # 會議記錄做好 30 天後刪錄音與逐字稿
     quit_event = asyncio.Event()
     state.quit_handler = make_quit_handler(asyncio.get_running_loop(), quit_event)
     ocr_task = asyncio.create_task(watch_slide_images())  # 不放進 serving：失敗不影響伺服器
+
+    def recording_mic():
+        from .audio_io import MicStream
+        return MicStream(voice_devices(config)[0])
+
+    # 語音沒在跑時，錄音自己開麥克風（不放進 serving：失敗不影響伺服器）
+    pump_task = asyncio.create_task(recorder_pump(recorder, recording_mic, lambda: state.voice_status != "off"))
     print(f"{persona.current().display_name}已啟動：主持人畫面 http://127.0.0.1:{config.control_port}/host　（按 Ctrl+C 結束）", flush=True)
     try:
         await serve_until_quit(serving, watchers, servers, quit_event)
     finally:
         state.quit_handler = None
+        pump_task.cancel()
+        await finish_recording(state)  # 還在錄音：自動停止並存檔
         if tunnel:
             tunnel.stop()
         state.close_source_view()  # 結束時一併關掉投影上的原文網頁視窗

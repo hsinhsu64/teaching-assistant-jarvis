@@ -17,6 +17,10 @@
     #light.offline { color: #ffb4b4; }
     #light.quiz { color: #ffe08a; }
     #light.voice { color: #9fe8b0; }
+    #recBadge {
+      position: fixed; top: 5.2vh; right: 1vw; z-index: 3; padding: 0.3em 0.9em; border-radius: 999px;
+      background: rgba(120, 0, 0, 0.88); color: #fff; font-size: 1.1vw; font-weight: 600;
+    }
     #phi {
       position: fixed; left: 1vw; bottom: 1.5vh; z-index: 3; padding: 0.3em 0.9em; border-radius: 999px;
       background: rgba(60, 45, 0, 0.9); color: #ffe08a; font-size: 1.1vw;
@@ -153,6 +157,7 @@
     <div id="hudQr" style="display:none"></div>
   </div>
   <div id="light">● 連線中</div>
+  <div id="recBadge" style="display:none">● 錄音中</div>
   <div id="phi" style="display:none">● 剛剛那句可能含識別資訊</div>
   <div id="vconfirm" style="display:none">要查的是：<span class="q" id="vconfirmQ"></span>
     <span class="how">說「對」開始查詢，或直接說出正確的詞</span></div>

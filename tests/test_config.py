@@ -102,3 +102,19 @@ def test_js_and_example_defaults_match_config():
         listed = ", ".join(f'"{k}"' for k in keys)
         assert f"[{listed}]" in js
         assert f"[{listed}]" in example
+
+
+def test_wards_configure_rules_and_whisper_hotwords(tmp_path):
+    """使用者（2026-11-22）：病房清單讓規則認得「芭比152」，也當 Whisper 提示詞（實測 8B 不再聽成芭比）。"""
+    from xiaoshen.phi import find_phi
+
+    p = tmp_path / "c.toml"
+    p.write_text("wards = ['8A', '8B', 'NBC', 'PI']\nward_misheard = ['芭比']\n", encoding="utf-8")
+    try:
+        c = load_config(p)
+        assert c.whisper_hotwords() == "8A病房 8B病房 NBC PI"  # 實測過的寫法
+        assert find_phi("今天要報是芭比152") == ["芭比152"]
+    finally:
+        Config()
+    assert find_phi("今天要報是芭比152") == []
+    assert Config().whisper_hotwords() == ""

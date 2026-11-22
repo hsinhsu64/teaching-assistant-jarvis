@@ -68,6 +68,26 @@ class Config:
     voice_max_listen_seconds: float = 60.0  # 每次叫醒最多送上雲端的收音秒數
     voice_speech_rms: float = 0.008         # 麥克風音量超過這個值算有人在說話（USB 麥克風安靜時實測約 0.001～0.003）
     keys_wake: list[str] = field(default_factory=list)  # 遙控器叫醒鍵
+    # 會議錄音與會議記錄（錄音、逐字稿、會議記錄都放在「紀錄」底下的子資料夾）
+    recording_max_minutes: int = 180       # 錄超過就自動停止並存檔
+    recording_retention_days: int = 30     # 會議記錄做好後幾天刪除錄音與逐字稿（會議記錄本身保留）
+    transcribe_fallback_minutes: int = 30  # 錄音送出後幾分鐘還沒有逐字稿，就提供「在這台電腦轉寫」
+    minutes_model: str = ""                # 整理會議記錄的模型；空字串＝和 model_answer 相同
+    worker_whisper_model: str = "large-v3"  # 轉寫工作站（有顯卡的電腦）用的 Whisper 模型
+    worker_cluster_threshold: float = 0.7   # 分講者的分群門檻（越小分得越細）
+    # 醫院的病房名稱：「病房＋床號」當病人識別資訊；也給轉寫當提示詞，減少錯聽
+    wards: list[str] = field(default_factory=list)
+    ward_misheard: list[str] = field(default_factory=list)  # 語音常把病房聽成的字（例：8B → 芭比）
+
+    def __post_init__(self):
+        from .phi import configure_wards
+
+        configure_wards(self.wards, self.ward_misheard)
+
+    def whisper_hotwords(self) -> str:
+        """轉寫的提示詞：「8A病房 8B病房 NBC PI」（實測這樣寫，Whisper 不再把 8B 聽成芭比）。"""
+        return " ".join(f"{w}病房" if any(ch.isdigit() for ch in w) else w
+                        for w in (x.strip() for x in self.wards) if w)
 
     @property
     def effective_wake_word(self) -> str:

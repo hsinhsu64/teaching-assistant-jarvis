@@ -432,6 +432,60 @@ function renderVoice(s) {
   box.scrollTop = box.scrollHeight;
 }
 
+// 會議錄音：按鈕開始／停止；錄音中每秒更新時間（伺服器只在狀態改變時送快照）
+let recBase = null;  // {elapsed, at}
+function mmss(sec) {
+  sec = Math.max(0, Math.floor(sec));
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), x = sec % 60;
+  return (h ? h + ":" + String(m).padStart(2, "0") : String(m).padStart(2, "0")) + ":" + String(x).padStart(2, "0");
+}
+function renderRecordLabel() {
+  const r = snap && snap.recording;
+  const btn = $("recordToggle");
+  if (r && r.active && recBase) {
+    btn.textContent = "■ 停止錄音";
+    btn.classList.add("on");
+    if (!(r.error)) $("recordMsg").textContent = `錄音中 ${mmss(recBase.elapsed + (Date.now() - recBase.at) / 1000)}（投影幕顯示「● 錄音中」）`;
+  } else {
+    btn.textContent = "● 開始錄音";
+    btn.classList.remove("on");
+  }
+}
+// 錄音音量條（使用者 2026-11-23）：錄音中每 0.2 秒（主持人手機 0.5 秒）問一次音量
+let levelTimer = null;
+function drawLevel(v) {
+  const bars = $("recMeter").children;
+  const n = Math.round(Math.max(0, Math.min(1, v)) * bars.length);
+  for (let i = 0; i < bars.length; i++) bars[i].className = i < n ? (i >= 9 ? "lit hot" : i >= 7 ? "lit warn" : "lit") : "";
+}
+async function pollLevel() {
+  try {
+    const r = await (await fetch("/api/recording/level")).json();
+    drawLevel(r.active ? r.level : 0);
+  } catch (e) { /* 下一次再試 */ }
+}
+function setLevelPolling(on) {
+  $("recMeter").classList.toggle("on", on);
+  if (on && !levelTimer) levelTimer = setInterval(pollLevel, PHONE_HOST ? 500 : 200);
+  if (!on && levelTimer) { clearInterval(levelTimer); levelTimer = null; drawLevel(0); }
+}
+
+function renderRecording(s) {
+  const r = s.recording || {};
+  setLevelPolling(!!r.active);
+  $("recordToggle").disabled = !r.available;
+  recBase = r.active ? { elapsed: r.elapsed || 0, at: Date.now() } : null;
+  renderRecordLabel();
+  if ((r.saved || null) !== lastSaved) { lastSaved = r.saved || null; loadMeetings(); }
+  if (typeof renderMeetings === "function" && $("meetingList")) renderMeetings();
+  const msg = $("recordMsg");
+  msg.classList.toggle("err", !!r.error);
+  if (r.error) msg.textContent = r.error;
+  else if (!r.active) msg.textContent = r.saved ? `已存檔：${r.saved}（等待轉寫）` : "";
+  renderRecordLabel();
+}
+setInterval(renderRecordLabel, 1000);
+
 function apply(s) {
   snap = s;
   setApp(s.app);
@@ -445,6 +499,7 @@ function apply(s) {
   renderDrafts(s);
   renderQuizFold(s);
   renderVoice(s);
+  renderRecording(s);
 }
 
 function connect() {
@@ -512,6 +567,13 @@ $("voiceWake").onclick = async () => {
   }
 };
 $("voiceStop").onclick = () => postJSON("/api/voice/stop");
+$("recordToggle").onclick = async () => {
+  const active = snap && snap.recording && snap.recording.active;
+  $("recordToggle").disabled = true;  // 存檔要幾秒：避免連按
+  const res = await postJSON(active ? "/api/recording/stop" : "/api/recording/start");
+  if (!res.ok) alert((await res.json().catch(() => ({}))).detail || "錄音失敗");
+  $("recordToggle").disabled = false;
+};
 $("voicePhiClear").onclick = () => postJSON("/api/voice/phi/clear");
 $("voiceConfirmGo").onclick = () => postJSON("/api/voice/confirm", { question: $("voiceConfirmText").value });
 $("voiceConfirmCancel").onclick = () => postJSON("/api/voice/confirm/cancel");
@@ -759,6 +821,393 @@ $("diagBtn").onclick = async () => {
   }
   $("diagBtn").disabled = false;
 };
+
+// ---- 會議記錄（錄音 → 逐字稿 → 填講者、確認去識別 → Gemini 整理）----
+const MEETING_STATUS = {
+  waiting: "等待家裡電腦轉寫", overdue: "家裡電腦還沒轉好", transcribing: "轉寫中",
+  transcribed: "逐字稿好了", minutes_done: "會議記錄好了", error: "轉寫失敗",
+};
+const KIND_LABEL = { person: "人名", chart: "病歷號", id: "身分證", phone: "電話", birthday: "生日", bed: "床號", other: "其他" };
+let meetingRows = [];
+let review = null;        // {id, speakers, candidates, known_names}
+let lastSaved = null;
+const watchingJobs = new Set();
+
+function fmtMinutes(sec) {
+  const m = Math.round(sec / 60);
+  return m >= 1 ? `${m} 分` : `${Math.round(sec)} 秒`;
+}
+
+async function loadMeetings() {
+  try {
+    // 主持人手機（經對外通道）只拿進度清單：沒有病人資料、檔案路徑
+    const res = await fetch(PHONE_HOST ? "/api/meeting-status" : "/api/meetings");
+    if (!res.ok) return;
+    meetingRows = await res.json();
+  } catch (e) { return; }
+  if (PHONE_HOST) for (const r of meetingRows) if (r.job) r.minutes_job = { status: r.job, phone: true };
+  renderMeetings();
+  if (PHONE_HOST) return;  // 手機不追整理細節；清單每 15 秒更新
+  for (const r of meetingRows) {
+    if (r.minutes_job && r.minutes_job.status === "running") watchJob(r.id);
+  }
+}
+
+function jobText(job) {
+  if (!job) return "";
+  if (job.phone) {
+    const t = { running: "整理中（約 1～3 分鐘）…", ok: "會議記錄好了（在筆電檢視）",
+                blocked: "沒有送出：還有疑似病人資料，請在筆電處理", failed: "整理失敗，請在筆電查看" }[job.status];
+    return t ? `<span class="st">${esc(t)}</span>` : "";
+  }
+  if (job.status === "running") return `<span class="st">整理中（約 1～3 分鐘）…</span>`;
+  if (job.status === "ok") {
+    const warn = (job.unresolved || []).length
+      ? `<div class="err">● 有代號換不回真名，請打開檔案手動改：${job.unresolved.map(esc).join("、")}</div>` : "";
+    return `<div class="src">已存：${esc(job.docx)}（另有 .md）</div>${warn}`;
+  }
+  if (job.status === "blocked") {
+    return `<div class="err">● 換完代號後還有疑似病人資料，沒有送出。請在去識別清單勾選或手動新增：</div>` +
+      job.hits.map((h) => `<div class="src">「${esc(h.text)}」：${esc(h.context)}</div>`).join("");
+  }
+  if (job.status === "failed") return `<div class="err">● 整理失敗：${esc(job.error || "")}</div>`;
+  return "";
+}
+
+function renderMeetings() {
+  const rec = snap && snap.recording;
+  const rows = [];
+  const busy = (r) => r.minutes_job && r.minutes_job.status === "running";
+  if (rec && rec.active) rows.push(`<div class="meeting-row"><b>${esc(rec.id || "")}</b><span class="st" style="color:#c62828">● 錄音中</span></div>`);
+  for (const r of meetingRows) {
+    let st = MEETING_STATUS[r.status] || r.status;
+    if (r.status === "overdue")  // 設成 0 分鐘＝沒有家裡的工作站（公開版）：錄完就直接在這台轉
+      st = r.fallback_minutes ? `${st}（超過 ${r.fallback_minutes} 分鐘）` : "可以在這台電腦轉寫";
+    if (PHONE_HOST && r.status === "transcribed") st += "（在筆電填講者、生成會議記錄）";
+    if (r.status === "error" && r.error) st += `：${r.error}`;
+    const btns = [];
+    if (r.status === "minutes_done" && !PHONE_HOST)
+      btns.push(`<button data-act="view" data-id="${esc(r.id)}">檢視記錄</button>`);
+    if ((r.status === "transcribed" || r.status === "minutes_done") && !PHONE_HOST) {
+      btns.push(`<button data-act="review" data-id="${esc(r.id)}"${busy(r) ? " disabled" : ""}>${r.status === "minutes_done" ? "重新生成" : "生成會議記錄"}</button>`);
+      btns.push(`<button class="secondary" data-act="transcript" data-id="${esc(r.id)}"${busy(r) ? " disabled" : ""}>逐字稿</button>`);
+    }
+    if (r.status === "minutes_done" && !PHONE_HOST)
+      btns.push(`<button class="secondary" data-act="delmin" data-id="${esc(r.id)}"${busy(r) ? " disabled" : ""}>刪除記錄</button>`);
+    if (r.can_transcribe_local)
+      btns.push(`<button class="secondary" data-act="local" data-id="${esc(r.id)}">在這台電腦轉寫</button>`);
+    if (!r.has_minutes && r.status !== "transcribing" && !PHONE_HOST)
+      btns.push(`<button class="secondary" data-act="delete" data-id="${esc(r.id)}">刪除</button>`);
+    rows.push(`<div class="meeting-row"><b>${esc(r.id)}</b><span class="st">${esc(st)}</span>${btns.join("")}` +
+      `<div style="flex-basis:100%">${jobText(r.minutes_job)}</div></div>`);
+  }
+  // 只顯示最近一筆（錄音中那一場＋最新一場），其他收起來，要看再展開
+  const shown = rec && rec.active ? 2 : 1;
+  const more = $("meetingMore");
+  const open = more ? more.open : false;
+  $("meetingList").innerHTML = !rows.length ? `<p class="muted">還沒有錄音</p>`
+    : rows.slice(0, shown).join("") + (rows.length > shown
+      ? `<details id="meetingMore"${open ? " open" : ""}><summary>其他 ${rows.length - shown} 筆</summary>${rows.slice(shown).join("")}</details>` : "");
+  if (review) $("mrSend").disabled = review.sending || busy(meetingRows.find((r) => r.id === review.id) || {});
+}
+
+function personChecks() {
+  return [...document.querySelectorAll("#mrItems input[type=checkbox]")];
+}
+
+const NEW_NAME = "__new__";
+
+function nameOptions(speaker, names) {
+  return `<option value="">（不指定：講者${speaker + 1}）</option>`
+    + names.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("")
+    + `<option value="${NEW_NAME}">＋ 其他名字…</option>`;
+}
+
+function speakerNames() {
+  // 講者 → 名字（下拉選單；選「其他名字」時用旁邊的輸入框）
+  const out = {};
+  for (const sel of document.querySelectorAll("#mrSpeakers select")) {
+    const box = document.querySelector(`#mrSpeakers input[data-spk="${sel.dataset.spk}"]`);
+    const name = (sel.value === NEW_NAME ? box.value : sel.value).trim();
+    if (name) out[sel.dataset.spk] = name;
+  }
+  return out;
+}
+
+function addSpeakerName(box) {
+  // 新打的名字加進每位講者的選單（名字一樣＝同一人），這位講者改成選它
+  const name = box.value.trim();
+  if (!name) return;
+  for (const sel of document.querySelectorAll("#mrSpeakers select")) {
+    if (![...sel.options].some((o) => o.value === name)) {
+      const opt = document.createElement("option");
+      opt.value = opt.textContent = name;
+      sel.insertBefore(opt, sel.querySelector(`option[value="${NEW_NAME}"]`));
+    }
+  }
+  document.querySelector(`#mrSpeakers select[data-spk="${box.dataset.spk}"]`).value = name;
+  box.value = "";
+  box.style.display = "none";
+}
+
+function syncNameChecks() {
+  // 填了講者名字（醫師、學員）的人名不換代號
+  const names = new Set(Object.values(speakerNames()));
+  for (const box of personChecks()) {
+    const t = box.dataset.text;
+    const isSpeaker = [...names].some((n) => n.includes(t) || (n.length >= 2 && t.includes(n)));
+    if (box.dataset.kind === "person" && isSpeaker && !box.dataset.touched) {
+      box.checked = false;
+      review.candidates[+box.dataset.i].checked = false;
+    }
+  }
+}
+
+function renderReview() {
+  $("meetingReview").style.display = review ? "" : "none";
+  if (!review) return;
+  $("mrTitle").textContent = `生成會議記錄：${review.id}`;
+  $("mrSpeakers").innerHTML = review.speakers.map((s) =>
+    `<div class="mr-spk"><b>講者${s.speaker + 1}</b>　發言 ${fmtMinutes(s.seconds)}
+      <select data-spk="${s.speaker}">${nameOptions(s.speaker, review.known_names || [])}</select>
+      <input data-spk="${s.speaker}" placeholder="輸入名字，按 Enter" autocomplete="off" style="display:none">
+      <div class="samples">${s.samples.map((x) => "「" + esc(x.slice(0, 40)) + "」").join(" ")}</div></div>`).join("")
+    || `<p class="muted">沒有分出講者</p>`;
+  renderReviewItems();
+  const qs = review.questions || [];
+  $("mrQuestionsBox").style.display = qs.length ? "" : "none";
+  $("mrQuestions").innerHTML = qs.map((q) =>
+    `<label class="mr-item"><input type="checkbox" data-q="${q.i}" checked>
+      <span class="src">[${mmss(q.t)}]</span> ${esc(q.text)}</label>`).join("");
+  $("mrType").value = review.meeting_type || "";
+  $("mrMsg").textContent = "";
+}
+
+function renderReviewItems() {
+  $("mrItems").innerHTML = review.candidates.map((c, i) =>
+    `<label class="mr-item"><input type="checkbox" data-i="${i}" data-kind="${esc(c.kind)}" data-text="${esc(c.text)}"${c.checked ? " checked" : ""}>
+      ${esc(c.text)}　<span class="src">${KIND_LABEL[c.kind] || c.kind}${c.count ? " " + c.count + " 次" : ""}</span></label>`).join("")
+    || `<p class="muted">沒有找到候選；有漏掉的請手動新增</p>`;
+}
+
+let mvId = null;
+function minutesEditing(on) {
+  $("mvBody").style.display = on ? "none" : "";
+  $("mvText").style.display = on ? "" : "none";
+  $("mvEdit").textContent = on ? "取消" : "修改";
+  $("mvSave").style.display = on ? "" : "none";
+}
+
+async function viewMinutes(id, msg = "") {
+  const res = await fetch(`/api/meetings/${encodeURIComponent(id)}/minutes-view`);
+  if (!res.ok) { alert((await res.json().catch(() => ({}))).detail || "讀不到會議記錄"); return; }
+  const data = await res.json();
+  mvId = data.id;
+  $("mvTitle").textContent = `會議記錄：${data.id}`;
+  $("mvBody").innerHTML = data.html;  // 伺服器已跳脫內容
+  $("mvText").value = data.md;
+  $("mvPath").textContent = `Word 檔：${data.docx}`;
+  $("mvMsg").textContent = msg;
+  minutesEditing(false);
+  $("minutesView").style.display = "";
+  $("minutesView").scrollIntoView({ block: "nearest" });
+}
+$("mvClose").onclick = () => { $("minutesView").style.display = "none"; mvId = null; };
+$("mvEdit").onclick = () => {
+  const editing = $("mvText").style.display !== "none";
+  if (editing) return viewMinutes(mvId);  // 取消：重新讀檔
+  minutesEditing(true);
+  $("mvText").focus();
+};
+$("mvSave").onclick = async () => {
+  // 以畫面為準：.md 與 Word 都依這裡的內容重寫（直接在 Word 裡改過的會被蓋掉）
+  $("mvSave").disabled = true;
+  try {
+    const res = await postJSON(`/api/meetings/${encodeURIComponent(mvId)}/minutes-md`, { md: $("mvText").value });
+    if (!res.ok) { $("mvMsg").textContent = (await res.json().catch(() => ({}))).detail || "無法儲存"; return; }
+    await viewMinutes(mvId, "已儲存（Word 檔已依畫面內容更新）");
+  } finally {
+    $("mvSave").disabled = false;
+  }
+};
+
+// 逐字稿：看＋改字、改講者（使用者 2026-11-23）
+let tv = null;  // {id, lines, speakers}
+function speakerOptions(cur, speakers) {
+  const ids = [...speakers];
+  const next = (ids.length ? Math.max(...ids) : -1) + 1;
+  const opts = ids.map((s) => `<option value="${s}"${s === cur ? " selected" : ""}>講者${s + 1}</option>`);
+  if (cur === null || cur === undefined) opts.unshift(`<option value="" selected>講者?</option>`);
+  opts.push(`<option value="${next}">新講者（講者${next + 1}）</option>`);
+  return opts.join("");
+}
+
+async function viewTranscript(id, msg = "") {
+  const res = await fetch(`/api/meetings/${encodeURIComponent(id)}/transcript`);
+  if (!res.ok) { alert((await res.json().catch(() => ({}))).detail || "讀不到逐字稿"); return; }
+  tv = await res.json();
+  $("tvTitle").textContent = `逐字稿：${tv.id}`;
+  $("tvBody").innerHTML = tv.lines.map((l) =>
+    `<div class="tv-line"><span class="t">[${mmss(l.start)}]</span>
+      <select data-i="${l.i}">${speakerOptions(l.speaker, tv.speakers)}</select>
+      <input data-i="${l.i}" value="${esc(l.text)}" autocomplete="off"></div>`).join("")
+    || `<p class="muted">逐字稿是空的</p>`;
+  $("tvMsg").textContent = msg || (tv.edited_at ? `上次修改：${tv.edited_at}` : "");
+  $("transcriptView").style.display = "";
+  $("transcriptView").scrollIntoView({ block: "nearest" });
+}
+$("tvClose").onclick = () => { $("transcriptView").style.display = "none"; tv = null; };
+$("tvSave").onclick = async () => {
+  if (!tv) return;
+  const edits = new Map();
+  for (const el of $("tvBody").querySelectorAll("input[data-i]")) {
+    const l = tv.lines[+el.dataset.i];
+    if (el.value.trim() !== l.text) edits.set(l.i, { ...(edits.get(l.i) || { i: l.i }), text: el.value });
+  }
+  for (const el of $("tvBody").querySelectorAll("select[data-i]")) {
+    const l = tv.lines[+el.dataset.i];
+    if (el.value !== "" && +el.value !== l.speaker) edits.set(l.i, { ...(edits.get(l.i) || { i: l.i }), speaker: +el.value });
+  }
+  if (!edits.size) { $("tvMsg").textContent = "沒有修改"; return; }
+  $("tvSave").disabled = true;
+  try {
+    const res = await postJSON(`/api/meetings/${encodeURIComponent(tv.id)}/transcript`, { lines: [...edits.values()] });
+    if (!res.ok) { $("tvMsg").textContent = (await res.json().catch(() => ({}))).detail || "無法儲存"; return; }
+    await viewTranscript(tv.id, `已儲存 ${edits.size} 句（會議記錄要重新生成才會跟著改）`);
+    if (review && review.id === tv.id) { review = null; renderReview(); }  // 確認畫面的候選已過時
+  } finally {
+    $("tvSave").disabled = false;
+  }
+};
+
+async function openReview(id) {
+  const res = await fetch(`/api/meetings/${encodeURIComponent(id)}/review`);
+  if (!res.ok) { alert((await res.json().catch(() => ({}))).detail || "讀不到逐字稿"); return; }
+  review = { id, ...(await res.json()) };
+  renderReview();
+  renderMeetings();
+  $("meetingReview").scrollIntoView({ block: "nearest" });
+}
+
+async function watchJob(id) {
+  if (watchingJobs.has(id)) return;
+  watchingJobs.add(id);
+  try {
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 2000));
+      const job = await (await fetch(`/api/meetings/${encodeURIComponent(id)}/minutes`)).json();
+      const row = meetingRows.find((r) => r.id === id);
+      if (row) row.minutes_job = job;
+      renderMeetings();
+      if (job.status !== "running") break;
+    }
+  } finally {
+    watchingJobs.delete(id);
+    loadMeetings();
+  }
+}
+
+async function startLocal(id, btn) {
+  const res = await postJSON(`/api/meetings/${encodeURIComponent(id)}/transcribe-local`);
+  const data = await res.json().catch(() => ({}));
+  const d = data.detail;
+  if (res.status === 409 && d && d.need_download) {
+    if (!confirm(d.message)) return;
+    await postJSON("/api/local-models/download");
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 2000));
+      const st = await (await fetch("/api/local-models")).json();
+      if (btn) btn.textContent = `下載模型中 ${Math.round((st.progress || 0) * 100)}%`;
+      if (st.status === "failed") { alert("模型下載失敗：" + (st.error || "")); return loadMeetings(); }
+      if (st.ready) break;
+    }
+    return startLocal(id, null);
+  }
+  if (!res.ok) alert((typeof d === "string" ? d : d && d.message) || "無法開始");
+  return loadMeetings();
+}
+
+$("meetingList").onclick = async (ev) => {
+  const b = ev.target.closest("button");
+  if (!b) return;
+  const id = b.dataset.id;
+  if (b.dataset.act === "review") return openReview(id);
+  if (b.dataset.act === "view") return viewMinutes(id);
+  if (b.dataset.act === "transcript") return viewTranscript(id);
+  if (b.dataset.act === "delmin") {
+    if (!confirm(`刪除 ${id} 的會議記錄（Word 與 .md）？\n錄音與逐字稿會留著，可以重新生成。雲端硬碟會先放進垃圾桶（約 30 天後永久刪除）。`)) return;
+    const res = await fetch(`/api/meetings/${encodeURIComponent(id)}/minutes`, { method: "DELETE" });
+    if (!res.ok) alert((await res.json().catch(() => ({}))).detail || "無法刪除");
+    if (mvId === id) { $("minutesView").style.display = "none"; mvId = null; }
+    return loadMeetings();
+  }
+  if (b.dataset.act === "delete") {
+    if (!confirm(`刪除 ${id} 的錄音與逐字稿？\n刪除後無法在程式裡復原；雲端硬碟會先放進垃圾桶（約 30 天後永久刪除）。`)) return;
+    const res = await fetch(`/api/meetings/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (!res.ok) alert((await res.json().catch(() => ({}))).detail || "無法刪除");
+    if (review && review.id === id) { review = null; renderReview(); }
+    return loadMeetings();
+  }
+  if (b.dataset.act === "local") {
+    if (!confirm("在這台電腦轉寫：比家裡電腦慢很多（約 1 小時錄音要 1 小時以上），會在背景跑。開始嗎？")) return;
+    return startLocal(id, b);
+  }
+};
+$("mrSpeakers").addEventListener("input", syncNameChecks);
+$("mrSpeakers").addEventListener("change", (ev) => {
+  const el = ev.target;
+  if (el.tagName === "SELECT") {
+    const box = document.querySelector(`#mrSpeakers input[data-spk="${el.dataset.spk}"]`);
+    box.style.display = el.value === NEW_NAME ? "" : "none";
+    if (el.value === NEW_NAME) box.focus();
+  } else if (el.tagName === "INPUT") {
+    addSpeakerName(el);
+  }
+  syncNameChecks();
+});
+$("mrSpeakers").addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter" && ev.target.tagName === "INPUT") { ev.preventDefault(); ev.target.blur(); }
+});
+$("mrItems").addEventListener("change", (ev) => {
+  const box = ev.target;
+  if (box.dataset.i === undefined) return;
+  box.dataset.touched = "1";
+  review.candidates[+box.dataset.i].checked = box.checked;
+});
+$("mrAdd").onclick = () => {
+  const text = $("mrAddText").value.trim();
+  if (!text || !review) return;
+  if (!review.candidates.some((c) => c.text === text))
+    review.candidates.unshift({ text, kind: $("mrAddKind").value, count: 0, checked: true });
+  $("mrAddText").value = "";
+  renderReviewItems();
+};
+$("mrAddText").addEventListener("keydown", (ev) => { if (ev.key === "Enter") $("mrAdd").click(); });
+$("mrCancel").onclick = () => { review = null; renderReview(); };
+$("mrSend").onclick = async () => {
+  if (!review || review.sending) return;
+  review.sending = true;
+  $("mrSend").disabled = true;  // 整理中：不要送出第二次
+  const speaker_names = speakerNames();
+  const questions = [...document.querySelectorAll("#mrQuestions input[type=checkbox]")]
+    .filter((b) => b.checked).map((b) => +b.dataset.q);
+  const items = personChecks().filter((b) => b.checked).map((b) => ({ text: b.dataset.text, kind: b.dataset.kind }));
+  const id = review.id;
+  const res = await postJSON(`/api/meetings/${encodeURIComponent(id)}/minutes`,
+                             { speaker_names, items, meeting_type: $("mrType").value.trim(), questions });
+  if (!res.ok) {
+    $("mrMsg").textContent = (await res.json().catch(() => ({}))).detail || "無法送出";
+    review.sending = false;
+    $("mrSend").disabled = false;
+    return;
+  }
+  review = null;
+  renderReview();
+  await loadMeetings();
+  watchJob(id);
+};
+setInterval(loadMeetings, 15000);
+loadMeetings();
 
 loadSettings();
 loadReferences();

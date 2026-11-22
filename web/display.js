@@ -114,6 +114,7 @@ function renderLight() {
     lightEl.textContent = "● 待命";
   }
   phiEl.style.display = snap && snap.voice_phi_alert ? "" : "none";
+  document.getElementById("recBadge").style.display = snap && snap.recording && snap.recording.active ? "" : "none";
   const vc = snap && snap.voice_confirm;
   document.getElementById("vconfirm").style.display = vc ? "" : "none";
   if (vc) document.getElementById("vconfirmQ").textContent = vc.question;

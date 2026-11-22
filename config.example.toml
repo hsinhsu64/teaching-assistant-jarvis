@@ -63,3 +63,16 @@ kws_threshold = 0.25            # 「下一頁」「上一頁」的門檻：越�
 wake_sensitivity = "medium"     # 喚醒靈敏度 "low"／"medium"／"high"：常叫不醒就調高（主持人畫面「設定」也能改）
 keys_wake = []                  # 遙控器叫醒鍵，例如 ["F5"]
 # kws_model_dir = 'C:\Users\YourName\AppData\Local\xiaoshen\models\sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20'
+
+# 會議錄音與會議記錄（主持人畫面按「● 開始錄音」；錄音、逐字稿、會議記錄存在「紀錄」底下）
+recording_max_minutes = 180        # 錄音最長幾分鐘，超過自動停止並存檔
+recording_retention_days = 30      # 會議記錄做好後幾天刪除錄音與逐字稿（會議記錄本身保留）
+transcribe_fallback_minutes = 30   # 錄音送出後幾分鐘還沒有逐字稿，提供「在這台電腦轉寫」
+# 沒有另一台有顯卡的轉寫工作站時，改成 transcribe_fallback_minutes = 0：錄完就能按「在這台電腦轉寫」
+minutes_model = ""                 # 整理會議記錄的模型；"" = 和 model_answer 相同
+# 轉寫工作站（另一台有顯卡的電腦；公開版沒有附工作站程式，只用得到「在這台電腦轉寫」）
+worker_whisper_model = "large-v3"
+worker_cluster_threshold = 0.7     # 分講者的分群門檻
+# 醫院的病房名稱：「病房＋床號」（例 8B152）當病人識別資訊去識別，也當轉寫提示詞減少錯聽
+# wards = ["8A", "8B"]
+# ward_misheard = []                # 語音常把病房聽成的字（看逐字稿發現了再加）

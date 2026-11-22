@@ -113,6 +113,7 @@ class AppState:
         self._line_turns: list[int] = []      # voice_transcript 每一行屬於第幾輪（個資檢查整輪合併）
         self._turn_no = 0
         self.voice_cloud_ok = True            # 最近一次連語音雲端是否成功（斷網時 voice_status 會自己回 standby）
+        self.recorder = None                  # 會議錄音器（recording.Recorder；launcher 接上）
 
     def set_voice_confirm(self, question: str, original: str, route: str, refs: list[str]) -> None:
         self.voice_confirm = {"question": question, "original": original, "route": route,
@@ -518,8 +519,22 @@ class AppState:
         with self.lock:
             self.teacher_questions.append({"id": qid, "text": text, "phi_hits": find_phi(text)})
             del self.teacher_questions[:-self.MAX_TEACHER_QUESTIONS]
+        self._keep_for_minutes(text)
         self._changed()
         return qid
+
+    def _keep_for_minutes(self, text: str) -> None:
+        """錄音期間的提問另存給那一場的會議記錄（使用者 2026-11-23：只收開始～停止之間的）。"""
+        rec = self.recorder
+        mid = rec.id if rec is not None else None
+        if not mid:
+            return
+        from . import meeting_store
+
+        try:
+            meeting_store.add_question(meeting_store.private_dir(), mid, rec.elapsed, text)
+        except OSError:
+            pass  # 存不了不影響主持人畫面
 
     def _teacher(self, qid: str) -> dict | None:
         return next((q for q in self.teacher_questions if q["id"] == qid), None)
@@ -696,12 +711,18 @@ class AppState:
             {"route": pending["route"]} if audience == "host" else {})) if pending else None
         snap["presenting"] = self.presenting
         snap["voice_down"] = self.voice_down()
+        rec = self.recorder
+        snap["recording"] = {"active": bool(rec and rec.is_recording), "elapsed": int(rec.elapsed) if rec else 0,
+                             "id": rec.id if rec else None}
         snap["decks"] = [{"name": p.stem} for p in self.deck_paths]
         snap["deck_candidates"] = list(self.deck_candidates)
         snap["voice_transcript"] = (list(self.voice_transcript) if audience == "host"
                                     else self.display_transcript())
         if audience == "host":
             snap["summary_note"] = self.summary_note
+            snap["recording"]["available"] = rec is not None
+            snap["recording"]["saved"] = rec.last_path.name if rec and rec.last_path else ""
+            snap["recording"]["error"] = rec.last_error if rec else ""
             snap["host_phone"] = {"paired": self.host_pairing.paired}
             snap["phone_control_enabled"] = self.phone_control_enabled
             snap["phone_search_enabled"] = self.phone_search_enabled

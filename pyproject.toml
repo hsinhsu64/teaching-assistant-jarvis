@@ -1,6 +1,6 @@
 [project]
 name = "xiaoshen"
-version = "0.2.0"
+version = "0.3.0"
 description = "教學助理賈維斯：生成式 AI 語音臨床教學助理"
 authors = [{ name = "hsinhsu64" }]
 requires-python = ">=3.12"
@@ -19,6 +19,8 @@ dependencies = [
     "sherpa-onnx>=2.0.1",
     "sounddevice>=0.5.6",
     "uvicorn[standard]>=0.54.0",
+    "soundfile>=0.14.0",
+    "python-docx>=1.2.0",
 ]
 
 [project.scripts]

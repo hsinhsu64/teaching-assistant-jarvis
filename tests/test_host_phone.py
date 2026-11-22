@@ -120,6 +120,47 @@ def test_paired_phone_cannot_get_slide_images(gate, state):
         assert gate.get(path).status_code == 403, path
 
 
+def test_paired_phone_cannot_reach_meeting_minutes(gate, state):
+    """審查：會議記錄的去識別候選（病人姓名、病歷號）、逐字稿、會議記錄不經對外通道。"""
+    pair(gate, state)
+    for method, path in [("get", "/api/meetings"), ("get", "/api/meetings/2026-11-22_0730/review"),
+                         ("post", "/api/meetings/2026-11-22_0730/minutes"),
+                         ("get", "/api/meetings/2026-11-22_0730/minutes"),
+                         ("get", "/api/meetings/2026-11-22_0730/minutes-view"),
+                         ("get", "/api/meetings/2026-11-22_0730/transcript"),
+                         ("post", "/api/meetings/2026-11-22_0730/transcript"),
+                         ("post", "/api/meetings/2026-11-22_0730/minutes-md"),
+                         ("delete", "/api/meetings/2026-11-22_0730/minutes"),
+                         ("delete", "/api/meetings/2026-11-22_0730"),
+                         ("post", "/api/meetings/2026-11-22_0730/transcribe-local/../review"),
+                         ("get", "/api/meetings/2026-11-22_0730/transcribe-local")]:
+        assert getattr(gate, method)(path).status_code == 403, path
+    assert gate.post("/api/recording/start").status_code != 403
+
+
+def test_paired_phone_sees_meeting_status_and_can_transcribe_here(state):
+    """使用者（2026-11-22）：主持人手機看每場進度、按「在這台電腦轉寫」；不經手病人資料。"""
+
+    class NoModels:  # 不要真的下載模型
+        downloads = 0
+
+        def ready(self):
+            return False
+
+        def download(self, progress):
+            NoModels.downloads += 1
+
+    state.public_base = BASE
+    control = create_control_app(state, Hub(), local_transcriber=NoModels())
+    with TestClient(create_gateway(create_phone_app(state), control, state), base_url=BASE,
+                    follow_redirects=False) as g:
+        pair(g, state)
+        assert g.get("/api/meeting-status").status_code == 200
+        assert g.post("/api/meetings/2026-11-22_0730/transcribe-local").status_code != 403
+        assert g.get("/api/local-models").status_code == 200
+        assert g.post("/api/local-models/download").status_code != 403
+
+
 def test_paired_phone_cannot_pair_or_revoke(gate, state):
     pair(gate, state)
     assert gate.post("/api/host-phone/pair").status_code == 403

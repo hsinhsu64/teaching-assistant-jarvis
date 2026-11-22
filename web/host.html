@@ -10,6 +10,8 @@
     header { display: flex; align-items: center; gap: 10px; padding: 8px 16px; background: var(--navy); color: var(--navy-ink); }
     header h1 { font-size: 17px; margin: 0 6px 0 0; white-space: nowrap; }
     header .spacer { flex: 1; }
+    header > button, #conn { white-space: nowrap; flex-shrink: 0; }
+    header { flex-wrap: wrap; row-gap: 6px; }
     #conn { font-size: 13px; }
     #conn.off { color: #ffb4b4; }
     header button.quit { background: transparent; color: var(--navy-ink); border: 1px solid rgba(255,255,255,.5); padding: 4px 12px; }
@@ -27,6 +29,27 @@
     .span-all { grid-column: 1 / -1; }
     section { background: var(--paper); border: 1px solid #d6dde6; border-radius: 10px; padding: 12px 14px; }
     section h2 { font-size: 15px; margin: 0 0 8px; color: var(--ink); font-weight: 700; }
+    .mr-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    body.phone-host #secMeetings { order: 7; }  /* 手機只看進度；填講者、去識別、檢視記錄只在筆電（含病人資料） */
+    .mr-spk { border-top: 1px solid #e3e8ef; padding: 6px 0; }
+    .mr-spk .samples { font-size: 12px; color: var(--muted); }
+    .mr-item { display: block; font-size: 13px; padding: 2px 0; }
+    .meeting-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; border-top: 1px solid #e3e8ef; padding: 6px 0; }
+    .meeting-row .st { font-size: 12px; color: var(--muted); }
+    .minutes-view { max-height: 60vh; overflow: auto; border: 1px solid #d6dde6; border-radius: 8px; padding: 6px 14px; margin: 6px 0; background: #fff; }
+    .minutes-view h1 { font-size: 17px; margin: 8px 0; }
+    .minutes-text { width: 100%; min-height: 50vh; font-size: 14px; line-height: 1.6; box-sizing: border-box; margin: 6px 0; }
+    .transcript-edit { max-height: 60vh; overflow: auto; border: 1px solid #d6dde6; border-radius: 8px; padding: 4px 8px; margin: 6px 0; background: #fff; }
+    .tv-line { display: flex; gap: 6px; align-items: center; padding: 2px 0; }
+    .tv-line .t { font-size: 12px; color: var(--muted); flex: 0 0 auto; min-width: 44px; }
+    .tv-line select { flex: 0 0 auto; }
+    .tv-line input { flex: 1; min-width: 0; }
+    .minutes-view h2 { font-size: 15px; margin: 12px 0 4px; }
+    .minutes-view h3 { font-size: 14px; margin: 10px 0 4px; }
+    .minutes-view p, .minutes-view li { font-size: 14px; line-height: 1.6; margin: 2px 0; }
+    .minutes-view ul, .minutes-view ol { margin: 2px 0; padding-left: 22px; }
+    #meetingMore > summary { cursor: pointer; font-size: 13px; color: var(--muted); padding: 6px 0; border-top: 1px solid #e3e8ef; }
+    #secMeetings h3 small { font-size: 12px; font-weight: 400; color: var(--muted); margin-left: 6px; }
     section h2 small, .fold h3 small { font-size: 12px; font-weight: 400; color: var(--muted); margin-left: 6px; }
     .fold h3 { font-size: 14px; margin: 14px 0 6px; padding-top: 10px; border-top: 1px solid #e6ebf1; color: var(--ink); font-weight: 700; }
     .fold h3:first-of-type { margin-top: 0; padding-top: 0; border-top: 0; }
@@ -59,6 +82,21 @@
     .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
     .row.top { margin: 0 0 8px; }
     .grow { flex: 1; }
+    #recordToggle.on { background: #c62828; color: #fff; border-color: #c62828; }
+    header #recordToggle { font-weight: 700; }
+    /* 錄音狀態放在按鈕正下方；寬度設 0、文字往右溢出，不把右邊的按鈕擠到下一列 */
+    #recWrap { display: inline-flex; flex-direction: column; align-items: flex-start; flex-shrink: 0; }
+    #recordMsg { display: block; width: 0; overflow: visible; white-space: nowrap; font-size: 12px; opacity: .85; margin-top: 2px; }
+    #recordMsg:empty { display: none; }  /* 沒有訊息時和其他按鈕一樣高 */
+    #recordMsg.err { color: #ffb4b4; opacity: 1; }
+    .rec-row { display: inline-flex; align-items: center; gap: 8px; }
+    /* 錄音中才顯示的音量條：10 格，綠→黃→紅 */
+    #recMeter { display: none; align-items: flex-end; gap: 2px; height: 20px; }
+    #recMeter.on { display: inline-flex; }
+    #recMeter i { width: 4px; border-radius: 1px; background: rgba(255,255,255,.18); }
+    #recMeter i.lit { background: #5fd49a; }
+    #recMeter i.lit.warn { background: #ffc93d; }
+    #recMeter i.lit.hot { background: #ff7b7b; }
     .voice-btns { display: inline-flex; gap: 8px; white-space: nowrap; flex-shrink: 0; margin-left: auto; }
     /* 回答工具列：投影／字卡／原文三組，組間空大一點（換行時也對齊左邊） */
     .row.groups { column-gap: 22px; row-gap: 8px; }
@@ -141,6 +179,9 @@
     <h1><span class="app-name"></span> · 主持人畫面</h1>
     <button id="checksToggle" data-level="pending" aria-expanded="false" aria-controls="secChecks" title="打開左欄的開機自我檢查，看全部項目">
       <span id="checksSummary">自我檢查：尚無結果</span><span class="caret">▸</span></button>
+    <span id="recWrap"><span class="rec-row"><button id="recordToggle" class="quit" disabled title="會議錄音（只用按鈕開始／停止）；錄音中投影幕右上角會顯示「● 錄音中」">● 開始錄音</button>
+      <span id="recMeter" title="錄音音量（太低：靠近麥克風或調高麥克風音量；常到紅色：離遠一點）" aria-label="錄音音量"><i style="height:30%"></i><i style="height:37%"></i><i style="height:44%"></i><i style="height:51%"></i><i style="height:58%"></i><i style="height:65%"></i><i style="height:72%"></i><i style="height:79%"></i><i style="height:86%"></i><i style="height:93%"></i></span></span>
+      <span id="recordMsg"></span></span>
     <span class="spacer"></span>
     <span id="conn">連線中…</span>
     <button id="toolsToggle" class="quit" title="設定、診斷包">⚙ 設定</button>
@@ -239,6 +280,56 @@
         <div id="cardMsg" class="src"></div>
         <div id="sourceMsg" class="src"></div>
         <div id="answer"><p class="muted">尚未發問</p></div>
+      </section>
+      <section id="secMeetings">
+        <h2>會議記錄<small>錄音 → 家裡電腦轉逐字稿 → 在這裡填講者、確認去識別 → 整理成會議記錄</small></h2>
+        <div id="meetingList"><p class="muted">還沒有錄音</p></div>
+        <div id="minutesView" class="laptop-only" style="display:none">
+          <div class="row"><h3 id="mvTitle" style="margin:0"></h3><span class="grow"></span>
+            <button id="mvEdit" class="secondary">修改</button><button id="mvSave" style="display:none">儲存</button>
+            <button id="mvClose" class="secondary">關閉</button></div>
+          <div id="mvBody" class="minutes-view"></div>
+          <textarea id="mvText" class="minutes-text" style="display:none"></textarea>
+          <div id="mvMsg" class="src"></div>
+          <div id="mvPath" class="src"></div>
+        </div>
+        <div id="transcriptView" class="laptop-only" style="display:none">
+          <div class="row"><h3 id="tvTitle" style="margin:0"></h3><span class="grow"></span>
+            <button id="tvSave">儲存修改</button><button id="tvClose" class="secondary">關閉</button></div>
+          <div class="src">改字或改講者後按「儲存修改」，去識別候選會重算。已經生成的會議記錄不會自動跟著改，請再按「重新生成」。</div>
+          <div id="tvBody" class="transcript-edit"></div>
+          <div id="tvMsg" class="src"></div>
+        </div>
+        <div class="src">會議記錄做好 30 天後，自動刪除那一場的錄音與逐字稿（會議記錄保留）。雲端硬碟裡刪掉的檔案會先進 Google 雲端硬碟的垃圾桶，約 30 天後才永久刪除。</div>
+        <div id="meetingReview" class="laptop-only" style="display:none">
+          <h3 id="mrTitle"></h3>
+          <div class="mr-cols">
+            <div>
+              <h3>講者<small>依發言長度；名字一樣＝同一人</small></h3>
+              <div id="mrSpeakers"></div>
+            </div>
+            <div>
+              <h3>去識別<small>勾選的送出前換成代號（病人A、〔病歷號1〕…），回來再換回真名</small></h3>
+              <div id="mrItems"></div>
+              <div class="row">
+                <input id="mrAddText" placeholder="漏掉的病人姓名或號碼" autocomplete="off">
+                <select id="mrAddKind">
+                  <option value="person">人名</option><option value="chart">病歷號</option><option value="id">身分證</option>
+                  <option value="phone">電話</option><option value="birthday">生日</option><option value="bed">床號</option>
+                  <option value="other">其他</option>
+                </select>
+                <button id="mrAdd" class="secondary">＋ 新增</button>
+              </div>
+            </div>
+          </div>
+          <div id="mrQuestionsBox" style="display:none">
+            <h3>手機提問<small>錄音期間學員「詢問老師」打字的提問；勾選的列入「四、提問與回答」（一樣先去識別）</small></h3>
+            <div id="mrQuestions"></div>
+          </div>
+          <div class="row"><label>會議類型 <input id="mrType" autocomplete="off"></label></div>
+          <div id="mrMsg" class="src"></div>
+          <div class="row"><button id="mrCancel" class="secondary">取消</button><button id="mrSend">送出整理</button></div>
+        </div>
       </section>
       <section id="secTeacher">
         <h2>與會人員提問<small>手機「詢問老師」，只有你看得到</small></h2>

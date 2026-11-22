@@ -8,8 +8,12 @@ from __future__ import annotations
 
 import base64
 import io
+import json
+import os
 import re
+import threading
 import tomllib
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -22,9 +26,10 @@ from pydantic import BaseModel
 from . import eventlog
 from .config import FOLDERS, REPO_ROOT, load_config
 from .converter import SOURCE_SUFFIXES
-from . import first_run, persona, settings_store
+from . import first_run, meeting_store, minutes_names, persona, settings_store
 from .host_phone import CODE_TTL
 from .hub import Hub
+from .phi import find_phi_kinds
 from .quiz import InvalidAnswer, QuizClosed
 from .state import AppState
 
@@ -137,6 +142,32 @@ class RefBody(BaseModel):
     name: str = ""
 
 
+class MinutesItem(BaseModel):
+    text: str
+    kind: str = "other"
+
+
+class MinutesBody(BaseModel):
+    speaker_names: dict[str, str] = {}
+    items: list[MinutesItem] = []
+    meeting_type: str = ""
+    questions: list[int] = []  # 要列入的手機提問（review 給的 i）
+
+
+class MinutesEditBody(BaseModel):
+    md: str
+
+
+class TranscriptLineEdit(BaseModel):
+    i: int
+    text: str | None = None
+    speaker: int | None = None
+
+
+class TranscriptEditBody(BaseModel):
+    lines: list[TranscriptLineEdit]
+
+
 class TokenBody(BaseModel):
     t: str
 
@@ -173,7 +204,8 @@ def system_device_names() -> dict[str, list[str]]:
 def create_control_app(state: AppState, hub: Hub, jobs: "JobRunner | None" = None, viewer=None,
                        config_path: Path = first_run.CONFIG_PATH, diagnostics_dir: Path | None = None,
                        logs_dir: Path | None = None, device_names=system_device_names,
-                       pick_folder=first_run.pick_folder_dialog) -> FastAPI:
+                       pick_folder=first_run.pick_folder_dialog, minutes_llm=None,
+                       local_transcriber=None) -> FastAPI:
     app = FastAPI(title="控制台", docs_url=None, redoc_url=None)
     state.on_change = lambda: hub.notify(state)
     app.mount("/static", StaticFiles(directory=WEB_DIR, check_dir=False), name="static")
@@ -630,6 +662,302 @@ def create_control_app(state: AppState, hub: Hub, jobs: "JobRunner | None" = Non
         eventlog.log("quit", source="host")
         state.quit_handler()
         return {"ok": True}
+
+    # ---- 會議錄音（只用按鈕開始／停止）----
+
+    def need_recorder():
+        if state.recorder is None:
+            raise HTTPException(409, "錄音功能未啟用")
+        return state.recorder
+
+    @app.get("/api/recording/level")
+    def recording_level():
+        """錄音中的音量（主持人畫面錄音鍵右側的音量條，錄音中每 0.2 秒問一次）。"""
+        rec = state.recorder
+        return {"active": bool(rec and rec.is_recording), "level": float(rec.level) if rec else 0.0}
+
+    @app.post("/api/recording/start")
+    def recording_start():
+        return {"id": need_recorder().start()}
+
+    @app.post("/api/recording/stop")
+    def recording_stop():
+        rec = need_recorder()
+        mid = rec.id
+        path = rec.stop()
+        if mid is not None and path is None and rec.last_error:
+            raise HTTPException(500, rec.last_error)
+        return {"id": mid, "path": str(path) if path else None}
+
+    # ---- 會議記錄（錄音 → 逐字稿 → 主持人填講者、確認去識別 → Gemini 整理）----
+
+    minute_jobs: dict[str, dict] = {}
+    minute_lock = threading.Lock()
+
+    def need_meeting(mid: str):
+        if not meeting_store.valid_id(mid):
+            raise HTTPException(404, "沒有這一場")
+        return meeting_store.paths(state.config, mid)
+
+    @app.get("/api/meetings")
+    def meetings():
+        rows = meeting_store.list_meetings(state.config, datetime.now())
+        for r in rows:
+            r["fallback_minutes"] = state.config.transcribe_fallback_minutes
+            r["can_transcribe_local"] = r["status"] in ("overdue", "error") and r["id"] not in local_jobs
+            if r["status"] == "error":
+                info = meeting_store.error_info(state.config, r["id"]) or {}
+                r["error"] = str(info.get("error") or "轉寫失敗")
+            job = minute_jobs.get(r["id"])
+            if job:
+                r["minutes_job"] = job
+        return rows
+
+    @app.get("/api/meeting-status")
+    def meeting_status():
+        """主持人手機用（經對外通道）：只有日期、進度、可否在筆電轉寫；不給檔案路徑、錯誤細節、擋下的病人資料片段。"""
+        safe = ("id", "status", "has_minutes", "fallback_minutes", "can_transcribe_local")
+        out = []
+        for r in meetings():
+            row = {k: r[k] for k in safe if k in r}
+            if r.get("minutes_job"):
+                row["job"] = r["minutes_job"].get("status", "")
+            out.append(row)
+        return out
+
+    @app.get("/api/meetings/{mid}/review")
+    def meeting_review(mid: str):
+        p = need_meeting(mid)
+        try:
+            doc = json.loads(p.transcript_json.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            raise HTTPException(404, "逐字稿還沒好")
+        known = minutes_names.load(meeting_store.private_dir())
+        cands = [{**c, "checked": not (c.get("kind") == "person" and c.get("text") in known)}
+                 for c in doc.get("candidates", [])]
+        # 錄音期間的手機提問（預設全勾）；提問裡的病人資料也列進去識別候選
+        questions = meeting_store.load_questions(meeting_store.private_dir(), mid)
+        for q in questions:
+            for text, kind in find_phi_kinds(q["text"]):
+                hit = next((c for c in cands if c.get("text") == text), None)
+                if hit is None:
+                    cands.append({"text": text, "kind": kind, "count": q["text"].count(text), "lines": [],
+                                  "checked": True})
+                else:
+                    hit["count"] = hit.get("count", 0) + q["text"].count(text)
+        cands.sort(key=lambda c: (-len(c.get("text", "")), c.get("text", "")))
+        return {"speakers": doc.get("speakers", []), "candidates": cands, "known_names": known,
+                "questions": [{"i": i, **q} for i, q in enumerate(questions)],
+                "meeting_type": persona.meeting_label(persona.current()) or state.config.meeting_type}
+
+    @app.post("/api/meetings/{mid}/minutes")
+    def meeting_minutes(mid: str, body: MinutesBody):
+        p = need_meeting(mid)
+        if not p.transcript_json.exists():
+            raise HTTPException(409, "逐字稿還沒好")
+        llm = minutes_llm or (jobs.llm if jobs is not None else None)
+        if llm is None:
+            raise HTTPException(409, "AI 未啟用")
+        names = {int(k): v.strip() for k, v in body.speaker_names.items() if k.lstrip("-").isdigit()}
+        all_questions = meeting_store.load_questions(meeting_store.private_dir(), mid)
+        picked = [all_questions[i] for i in sorted(set(body.questions)) if 0 <= i < len(all_questions)]
+        minutes_names.remember(meeting_store.private_dir(), list(names.values()))
+        with minute_lock:
+            if (minute_jobs.get(mid) or {}).get("status") == "running":
+                raise HTTPException(409, "這一場正在整理")
+            minute_jobs[mid] = {"status": "running"}
+
+        def work():
+            from .minutes import generate_minutes
+
+            try:
+                res = generate_minutes(state.config, llm, mid, names, [i.model_dump() for i in body.items],
+                                       body.meeting_type.strip() or state.config.meeting_type, datetime.now(),
+                                       questions=picked)
+            except Exception as e:
+                res = {"status": "failed", "error": f"{e.__class__.__name__}: {str(e)[:300]}"}
+                eventlog.log("minutes", action="failed", id=mid)
+            minute_jobs[mid] = res
+            state._changed()
+
+        threading.Thread(target=work, daemon=True).start()
+        return {"status": "running"}
+
+    @app.get("/api/meetings/{mid}/minutes")
+    def meeting_minutes_status(mid: str):
+        need_meeting(mid)
+        return minute_jobs.get(mid) or {"status": "none"}
+
+    @app.get("/api/meetings/{mid}/minutes-view")
+    def meeting_minutes_view(mid: str):
+        """主持人按「檢視記錄」：會議記錄轉成 HTML 顯示在主持人畫面（只在筆電；手機通道擋掉 /api/meetings）。"""
+        from .minutes import md_to_html
+
+        p = need_meeting(mid)
+        if not p.minutes_md.exists():
+            raise HTTPException(404, "還沒有會議記錄")
+        md = p.minutes_md.read_text(encoding="utf-8")
+        return {"id": mid, "html": md_to_html(md), "md": md, "docx": str(p.minutes_docx)}
+
+    def minutes_busy(mid: str) -> None:
+        with minute_lock:
+            if (minute_jobs.get(mid) or {}).get("status") == "running":
+                raise HTTPException(409, "這一場正在整理會議記錄，整理完再改")
+
+    def write_text_atomic(path: Path, text: str) -> None:
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+
+    @app.post("/api/meetings/{mid}/minutes-md")
+    def meeting_minutes_edit(mid: str, body: MinutesEditBody):
+        """主持人在畫面上改會議記錄（使用者 2026-11-23：以畫面為準，Word 依畫面內容重新產生）。"""
+        from .minutes import write_docx
+
+        p = need_meeting(mid)
+        if not p.minutes_md.exists():
+            raise HTTPException(404, "還沒有會議記錄")
+        minutes_busy(mid)
+        md = body.md.replace("\r\n", "\n")
+        write_text_atomic(p.minutes_md, md)
+        write_docx(md, p.minutes_docx)
+        eventlog.log("minutes_edit", id=mid)
+        return {"ok": True}
+
+    @app.delete("/api/meetings/{mid}/minutes")
+    def meeting_minutes_delete(mid: str):
+        """只刪會議記錄；錄音與逐字稿留著，可以重新生成（使用者 2026-11-23）。"""
+        p = need_meeting(mid)
+        if not (p.minutes_md.exists() or p.minutes_docx.exists()):
+            raise HTTPException(404, "沒有會議記錄")
+        minutes_busy(mid)
+        removed = meeting_store.delete_minutes(state.config, mid)
+        minute_jobs.pop(mid, None)
+        eventlog.log("minutes_delete", id=mid, files=removed)
+        return {"removed": removed}
+
+    @app.get("/api/meetings/{mid}/transcript")
+    def meeting_transcript(mid: str):
+        p = need_meeting(mid)
+        try:
+            doc = json.loads(p.transcript_json.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            raise HTTPException(404, "逐字稿還沒好")
+        lines = doc.get("lines", [])
+        return {"id": mid, "edited_at": doc.get("edited_at", ""),
+                "speakers": sorted({l["speaker"] for l in lines if l.get("speaker") is not None}),
+                "lines": [{"i": i, "start": l.get("start", 0), "text": l.get("text", ""), "speaker": l.get("speaker")}
+                          for i, l in enumerate(lines)]}
+
+    @app.post("/api/meetings/{mid}/transcript")
+    def meeting_transcript_edit(mid: str, body: TranscriptEditBody):
+        """主持人改逐字稿的字與講者（使用者 2026-11-23）；去識別候選重算，會議記錄要按「重新生成」才會跟著變。"""
+        from .transcript_build import edit_transcript, transcript_text
+
+        p = need_meeting(mid)
+        minutes_busy(mid)
+        try:
+            doc = json.loads(p.transcript_json.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            raise HTTPException(404, "逐字稿還沒好")
+        try:
+            new = edit_transcript(doc, [e.model_dump(exclude_none=True) for e in body.lines])
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        new["edited_at"] = datetime.now().isoformat(timespec="seconds")
+        write_text_atomic(p.transcript_json, json.dumps(new, ensure_ascii=False, indent=1))
+        write_text_atomic(p.transcript_txt, transcript_text(new))
+        eventlog.log("transcript_edit", id=mid, lines=len(body.lines))
+        return {"ok": True}
+
+    # ---- 筆電退路：在這台電腦轉寫（主持人按了才跑；模型主持人確認才下載）----
+
+    local = local_transcriber
+    local_jobs: set[str] = set()
+    local_models = {"status": "none", "progress": 0.0}
+
+    def get_local():
+        nonlocal local
+        if local is None:
+            from .local_transcribe import LocalTranscriber
+
+            local = LocalTranscriber(threshold=state.config.worker_cluster_threshold)
+        return local
+
+    @app.get("/api/local-models")
+    def local_models_status():
+        out = {"status": local_models["status"], "ready": get_local().ready(), "progress": local_models["progress"]}
+        if local_models["status"] == "failed":
+            out["error"] = local_models.get("error", "")
+        return out
+
+    @app.post("/api/local-models/download")
+    def local_models_download():
+        lt = get_local()
+        with minute_lock:
+            if local_models["status"] == "running":
+                return {"status": "running"}
+            if lt.ready():
+                local_models.update(status="done", progress=1.0)
+                return {"status": "done"}
+            local_models.update(status="running", progress=0.0, error="")
+
+        def work():
+            try:
+                lt.download(lambda f: local_models.update(progress=round(f, 3)))
+                local_models.update(status="done", progress=1.0)
+                eventlog.log("local_models", action="downloaded")
+            except Exception as e:
+                local_models.update(status="failed", error=str(e)[:300])
+                eventlog.log("local_models", action="failed")
+
+        threading.Thread(target=work, daemon=True).start()
+        return {"status": "running"}
+
+    @app.post("/api/meetings/{mid}/transcribe-local")
+    def meeting_transcribe_local(mid: str):
+        from . import worker_queue
+
+        p = need_meeting(mid)
+        if p.transcript_json.exists():
+            raise HTTPException(409, "已經有逐字稿")
+        if not (p.ready.exists() and meeting_store.audio_complete(p)):
+            raise HTTPException(409, "這台電腦還沒有完整的錄音檔")
+        lt = get_local()
+        if not lt.ready():
+            from .local_transcribe import DOWNLOAD_NOTE
+
+            raise HTTPException(409, {"need_download": True, "message": DOWNLOAD_NOTE})
+        with minute_lock:
+            if mid in local_jobs:
+                raise HTTPException(409, "這一場已經在這台電腦轉寫中")
+            local_jobs.add(mid)
+        p.error.unlink(missing_ok=True)  # 失敗過的也可以在這台重轉
+
+        def work():
+            try:
+                eventlog.log("local_transcribe", action="start", id=mid)
+                out = worker_queue.process(state.config, mid, lt.make_engines())
+                eventlog.log("local_transcribe", action="done" if out == p.transcript_json else "failed", id=mid)
+            finally:
+                local_jobs.discard(mid)
+                state._changed()
+
+        threading.Thread(target=work, daemon=True).start()
+        return {"status": "running"}
+
+    @app.delete("/api/meetings/{mid}")
+    def meeting_delete(mid: str):
+        """只能刪還沒有會議記錄的場次（有記錄的 30 天後自動刪錄音與逐字稿）。"""
+        p = need_meeting(mid)
+        if p.minutes_docx.exists():
+            raise HTTPException(409, "已經有會議記錄：錄音與逐字稿會在做好記錄 30 天後自動刪除")
+        if state.recorder is not None and state.recorder.id == mid:
+            raise HTTPException(409, "這一場還在錄音")
+        removed = meeting_store.delete_files(state.config, mid)
+        minute_jobs.pop(mid, None)
+        eventlog.log("meeting_delete", id=mid, files=removed)
+        return {"removed": removed}
 
     @app.post("/api/voice/ref")
     def voice_ref(body: RefBody):
